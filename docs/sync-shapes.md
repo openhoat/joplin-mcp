@@ -34,6 +34,14 @@ Fields observed on real rows: `title`, `body`, `source`, `source_url`, `source_a
 always refreshed. `extracted_resource_ids` is filled by the server on save, not needed on
 write.
 
+## Todos (checklists and reminders)
+
+A todo is a note with `is_todo = 1`; `todo_due` and `todo_completed` hold epoch milliseconds
+(`0` = unset). There is no alarm item type in Joplin Server — a reminder is exactly a todo
+with a `todo_due` date, the client schedules the notification. Turning a note back into a
+plain note clears the three fields. Marking done writes the current time in
+`todo_completed`; reopening sets it back to `0`.
+
 ## Resources (attachments)
 
 Metadata item (`jop_type=4`) JSON: `{is_locked, ocr_*, blob_updated_time, user_data,

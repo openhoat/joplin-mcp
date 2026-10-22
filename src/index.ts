@@ -64,6 +64,22 @@ function formatTimestamp(tsMs: number | string): string {
   catch { return String(tsMs); }
 }
 
+/**
+ * Normalise a todo due date: epoch ms (number or numeric string) or an ISO 8601
+ * string. Returns undefined when the caller did not provide a value, 0 when the
+ * value must be cleared, NaN when it cannot be parsed.
+ */
+function parseDueDate(value: string | number | null | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return 0;
+  if (typeof value === "number") return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+  if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10);
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? NaN : parsed;
+}
+
 function readContent(raw: Buffer | string | null): string {
   if (raw === null || raw === undefined) return "";
   if (typeof raw === "string") return raw;
@@ -519,7 +535,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.3.0" });
+  const server = new McpServer({ name: "joplin", version: "1.4.0" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -712,21 +728,97 @@ function createMcpServer(): McpServer {
     }
   );
 
+  server.tool("list_todos", "List the todos (notes carrying a checkbox): open ones, completed ones or both, optionally scoped to a notebook, sorted by due date. In Joplin a reminder is a todo with a `todo_due` date — there is no separate alarm item.",
+    {
+      status: z.enum(["open", "done", "all"]).default("open").describe("Which todos to list: not completed, completed, or both"),
+      notebook_id: z.string().optional().describe("Restrict the listing to one notebook"),
+      limit: z.number().default(50).describe("Max todos to return")
+    },
+    async ({ status, notebook_id, limit }) => {
+      try {
+        const userId = await getUserId();
+        let parentJopId: string | undefined;
+        if (notebook_id) {
+          const nb = await findItem(notebook_id, JOP_TYPE_FOLDER, userId);
+          if (!nb) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' non trouvé.` }] };
+          parentJopId = nb.jop_id;
+        }
+        const notes = await pool.query(
+          `SELECT id, content, jop_id, jop_parent_id, updated_time FROM items WHERE owner_id = $1 AND jop_type = $2`,
+          [userId, JOP_TYPE_NOTE]
+        );
+        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_FOLDER]);
+        const folderTitles = new Map<string, string>();
+        for (const f of folders.rows as JoplinItemRow[]) folderTitles.set(String(f.jop_id), parseJoplinContent(f.content).title);
+        const todos = (notes.rows as JoplinItemRow[])
+          .map((row) => {
+            const json = parseRawJson(row.content);
+            return {
+              id: row.id,
+              title: String(json.title || "(sans titre)"),
+              isTodo: Number(json.is_todo || 0) === 1,
+              deleted: Number(json.deleted_time || 0) > 0,
+              due: Number(json.todo_due || 0),
+              completed: Number(json.todo_completed || 0),
+              parent: String(row.jop_parent_id),
+              notebook: folderTitles.get(String(row.jop_parent_id)) || "",
+              updated: Number(row.updated_time)
+            };
+          })
+          .filter((t) => t.isTodo && !t.deleted && (!parentJopId || t.parent === parentJopId))
+          .filter((t) => (status === "all" ? true : status === "open" ? t.completed === 0 : t.completed > 0));
+        todos.sort((a, b) => {
+          if (status === "done") return b.completed - a.completed;
+          if (a.completed !== b.completed) return a.completed - b.completed;
+          if (a.due === 0 && b.due > 0) return 1;
+          if (b.due === 0 && a.due > 0) return -1;
+          return a.due - b.due || a.title.localeCompare(b.title);
+        });
+        const shown = todos.slice(0, Math.min(limit, 200));
+        if (shown.length === 0) {
+          const empty = status === "open" ? "Aucun todo à faire." : status === "done" ? "Aucun todo terminé." : "Aucun todo trouvé.";
+          return { content: [{ type: "text" as const, text: empty }] };
+        }
+        const lines = shown.map((t) => {
+          const parts = [t.due > 0 ? `échéance ${formatTimestamp(t.due)}` : "", t.completed > 0 ? `fait le ${formatTimestamp(t.completed)}` : ""].filter(Boolean);
+          return `${t.completed > 0 ? "☑️" : "☐"} **${t.title}**${parts.length ? ` · ${parts.join(" · ")}` : ""}\n   ID: ${t.id}${t.notebook ? ` · carnet: ${t.notebook}` : ""}`;
+        });
+        const header = status === "done" ? "faits" : status === "open" ? "à faire" : "tous";
+        return { content: [{ type: "text" as const, text: `☑️ Todos (${todos.length} ${header}, ${shown.length} affichés):\n\n${lines.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
   // ====== WRITE TOOLS ======
 
   server.tool("create_note", "Create a new note in Joplin. IMPORTANT: You MUST call this function to create a note. NEVER tell the user a note has been created without actually calling this function and receiving a success response. Use `search_notebooks` or `list_notebooks` first to find the notebook_id if the user specifies a notebook.",
     {
       title: z.string().describe("Note title"),
       body: z.string().describe("Note body in Markdown"),
-      notebook_id: z.string().optional().describe("Optional notebook ID to place the note in")
+      notebook_id: z.string().optional().describe("Optional notebook ID to place the note in"),
+      is_todo: z.boolean().optional().describe("Create a todo (checklist) instead of a plain note"),
+      todo_due: z.union([z.string(), z.number(), z.null()]).optional().describe("Due date for a todo: ISO 8601 string (`2026-11-03`, `2026-11-03T09:00`) or epoch milliseconds. null clears it"),
+      todo_completed: z.boolean().optional().describe("Mark the todo as completed right away (uses the current time)")
     },
-    async ({ title, body, notebook_id }) => {
+    async ({ title, body, notebook_id, is_todo, todo_due, todo_completed }) => {
       try {
         const userId = await getUserId();
         const noteId = generateId();
         const now = Date.now();
         const jopId = generateJopId();
-        const contentBytes = buildNoteContent(title, body);
+        const todoExtra: Record<string, any> = {};
+        if (is_todo !== undefined) todoExtra.is_todo = is_todo ? 1 : 0;
+        if (todo_due !== undefined) {
+          const due = parseDueDate(todo_due);
+          if (due === null || Number.isNaN(due)) return { content: [{ type: "text" as const, text: `Erreur: échéance '${todo_due}' illisible (ISO 8601 ou epoch ms attendu).` }] };
+          todoExtra.todo_due = due;
+          if (due > 0 && todoExtra.is_todo === undefined) todoExtra.is_todo = 1;
+        }
+        if (todo_completed) {
+          todoExtra.todo_completed = now;
+          todoExtra.is_todo = 1;
+        }
+        const contentBytes = buildNoteContent(title, body, todoExtra);
         let parentJopId = "";
         if (notebook_id) {
           // notebook_id is the base62 'id' - look up the corresponding 'jop_id' (UUID hex)
@@ -756,11 +848,15 @@ function createMcpServer(): McpServer {
     {
       note_id: z.string().describe("REQUIRED: The ID of the note to update (from search_notes or get_note)"),
       title: z.string().optional().describe("New title (optional, keeps existing if not provided)"),
-      body: z.string().optional().describe("New body content in Markdown (optional, keeps existing if not provided)")
+      body: z.string().optional().describe("New body content in Markdown (optional, keeps existing if not provided)"),
+      is_todo: z.boolean().optional().describe("Turn the note into a todo (true) or back into a plain note (false)"),
+      todo_due: z.union([z.string(), z.number(), z.null()]).optional().describe("Due date: ISO 8601 string or epoch milliseconds; null clears it"),
+      todo_completed: z.boolean().optional().describe("true marks the todo done now, false reopens it")
     },
-    async ({ note_id, title, body }) => {
+    async ({ note_id, title, body, is_todo, todo_due, todo_completed }) => {
       try {
-        if (!title && !body) return { content: [{ type: "text" as const, text: "Erreur: fournis au moins un titre ou un contenu à modifier." }] };
+        const hasTodoChange = is_todo !== undefined || todo_due !== undefined || todo_completed !== undefined;
+        if (!title && !body && !hasTodoChange) return { content: [{ type: "text" as const, text: "Erreur: fournis au moins un titre, un contenu ou un champ de todo à modifier." }] };
         const result = await pool.query(
           `SELECT i.id, i.content, i.jop_parent_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
           [note_id, JOP_TYPE_NOTE]
@@ -778,6 +874,25 @@ function createMcpServer(): McpServer {
             if (!["title", "body", "source", "source_url"].includes(k)) extra[k] = v;
           }
         }
+        // Todo fields: Joplin stores them in the note body JSON (is_todo 1/0, todo_due / todo_completed as epoch ms)
+        if (is_todo === false) {
+          extra.is_todo = 0;
+          extra.todo_due = 0;
+          extra.todo_completed = 0;
+        } else if (is_todo === true) {
+          extra.is_todo = 1;
+        }
+        if (todo_due !== undefined) {
+          const due = parseDueDate(todo_due);
+          if (due === undefined || Number.isNaN(due)) return { content: [{ type: "text" as const, text: `Erreur: échéance '${todo_due}' illisible (ISO 8601 ou epoch ms attendu).` }] };
+          extra.todo_due = due;
+          if (due > 0 && extra.is_todo === undefined) extra.is_todo = 1;
+        }
+        if (todo_completed !== undefined) {
+          extra.todo_completed = todo_completed ? now : 0;
+          if (todo_completed) extra.is_todo = 1;
+          else if (extra.is_todo === undefined) extra.is_todo = 1;
+        }
         const contentBytes = buildNoteContent(newTitle, newBody, { ...extra, user_updated_time: now });
         await pool.query(
           `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`,
@@ -788,7 +903,14 @@ function createMcpServer(): McpServer {
         const jopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1`, [note_id]);
         const jopId = jopIdResult.rows.length > 0 ? jopIdResult.rows[0].jop_id : note_id;
         await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId: jopId, userId });
-        return { content: [{ type: "text" as const, text: `✅ Note mise à jour !\n📝 Titre: ${newTitle}\n🆔 ID: ${note_id}` }] };
+        const todoLine = (() => {
+          if (!hasTodoChange) return "";
+          if (Number(extra.is_todo) !== 1) return "\n☑️ Todo désactivé (note simple)";
+          const due = Number(extra.todo_due || 0);
+          const done = Number(extra.todo_completed || 0);
+          return `\n☑️ Todo · échéance: ${due > 0 ? formatTimestamp(due) : "aucune"} · ${done > 0 ? `fait le ${formatTimestamp(done)}` : "à faire"}`;
+        })();
+        return { content: [{ type: "text" as const, text: `✅ Note mise à jour !\n📝 Titre: ${newTitle}\n🆔 ID: ${note_id}${todoLine}` }] };
       } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
     }
   );
@@ -1457,6 +1579,122 @@ function createMcpServer(): McpServer {
           await recordChange({ itemId: rel.id, itemType: JOP_TYPE_NOTE_TAG, changeType: CHANGE_DELETED, jopId: rel.jop_id, userId, changeItemType: 2 });
         }
         return { content: [{ type: "text" as const, text: `✅ Tag retiré !\n🏷️ ${parseJoplinContent(tag.content).title}\n📝 Note: ${note.id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("list_notes_with_tag", "List the notes carrying a tag, most recently updated first (resolves the note<->tag relations used by Joplin sync).",
+    {
+      tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
+      limit: z.number().default(50).describe("Max notes to return")
+    },
+    async ({ tag_id, limit }) => {
+      try {
+        const userId = await getUserId();
+        const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
+        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' non trouvé.` }] };
+        const tagTitle = parseJoplinContent(tag.content).title;
+        if (parseJoplinContent(tag.content).isDeleted) return { content: [{ type: "text" as const, text: `Le tag "${tagTitle}" est dans la corbeille.` }] };
+        const relations = await pool.query(`SELECT content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
+        const noteJopIds = relations.rows
+          .map((row: any) => parseRawJson(row.content))
+          .filter((json: any) => String(json.tag_id || "") === tag.jop_id && Number(json.deleted_time || 0) === 0)
+          .map((json: any) => String(json.note_id || ""));
+        if (noteJopIds.length === 0) return { content: [{ type: "text" as const, text: `Le tag "${tagTitle}" n'est assigné à aucune note.` }] };
+        const notes = await pool.query(
+          `SELECT id, content, jop_id, jop_parent_id, updated_time FROM items
+           WHERE owner_id = $1 AND jop_type = $2 AND jop_id = ANY($3::text[])`,
+          [userId, JOP_TYPE_NOTE, noteJopIds]
+        );
+        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_FOLDER]);
+        const folderTitles = new Map<string, string>();
+        for (const f of folders.rows as JoplinItemRow[]) folderTitles.set(String(f.jop_id), parseJoplinContent(f.content).title);
+        const alive = (notes.rows as JoplinItemRow[])
+          .map((row) => ({
+            id: row.id,
+            title: parseJoplinContent(row.content).title,
+            deleted: parseJoplinContent(row.content).isDeleted,
+            notebook: folderTitles.get(String(row.jop_parent_id)) || "",
+            updated: Number(row.updated_time)
+          }))
+          .filter((n) => !n.deleted)
+          .sort((a, b) => b.updated - a.updated);
+        if (alive.length === 0) return { content: [{ type: "text" as const, text: `Le tag "${tagTitle}" n'est assigné à aucune note active.` }] };
+        const shown = alive.slice(0, Math.min(limit, 200));
+        const lines = shown.map((n) => `📝 **${n.title}**\n   ID: ${n.id}${n.notebook ? ` · carnet: ${n.notebook}` : ""} · maj ${formatTimestamp(n.updated)}`);
+        return { content: [{ type: "text" as const, text: `🏷️ Notes avec le tag "${tagTitle}" (${alive.length}, ${shown.length} affichées):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("rename_tag", "Rename a tag. The tag id is kept, so every note assignment survives.",
+    {
+      tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
+      title: z.string().describe("New tag title")
+    },
+    async ({ tag_id, title }) => {
+      try {
+        const userId = await getUserId();
+        const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
+        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' non trouvé.` }] };
+        const current = parseJoplinContent(tag.content);
+        if (current.isDeleted) return { content: [{ type: "text" as const, text: `Le tag "${current.title}" est dans la corbeille.` }] };
+        const trimmed = title.trim();
+        if (!trimmed) return { content: [{ type: "text" as const, text: "Erreur: le nouveau titre est vide." }] };
+        if (trimmed === current.title) return { content: [{ type: "text" as const, text: `Le tag s'appelle déjà "${trimmed}" (ID: ${tag.id}).` }] };
+        const others = await pool.query(
+          `SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2 AND id <> $3`,
+          [userId, JOP_TYPE_TAG, tag.id]
+        );
+        const clash = others.rows.find((row: any) => {
+          const parsed = parseJoplinContent(row.content);
+          return !parsed.isDeleted && parsed.title === trimmed;
+        });
+        if (clash) {
+          return { content: [{ type: "text" as const, text: `Un tag "${trimmed}" existe déjà (ID: ${clash.id}) — renommer créerait un doublon. Utilise attach_tag_to_note puis detach/detach_tag_from_note pour fusionner à la main.` }] };
+        }
+        const now = Date.now();
+        const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(tag.content), title: trimmed, user_updated_time: now }), "utf-8");
+        await pool.query(
+          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
+          [contentBytes, contentBytes.length, now, tag.id]
+        );
+        await recordChange({ itemId: tag.id, itemType: JOP_TYPE_TAG, changeType: CHANGE_UPDATED, jopId: tag.jop_id, userId, changeItemType: 1 });
+        return { content: [{ type: "text" as const, text: `✅ Tag renommé !\n🏷️ ${current.title} → ${trimmed}\n🆔 ID: ${tag.id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("delete_tag", "Delete a tag: trashes the tag and all its note assignments (soft delete, same as the desktop). The notes themselves are never touched.",
+    { tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)") },
+    async ({ tag_id }) => {
+      try {
+        const userId = await getUserId();
+        const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
+        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' non trouvé.` }] };
+        const parsedTag = parseJoplinContent(tag.content);
+        if (parsedTag.isDeleted) return { content: [{ type: "text" as const, text: `Le tag "${parsedTag.title}" est déjà dans la corbeille.` }] };
+        const now = Date.now();
+        const relations = await pool.query(`SELECT id, content, jop_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
+        const alive = relations.rows.filter((row: any) => {
+          const json = parseRawJson(row.content);
+          return String(json.tag_id || "") === tag.jop_id && Number(json.deleted_time || 0) === 0;
+        });
+        for (const rel of alive) {
+          const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(rel.content), deleted_time: now, user_updated_time: now }), "utf-8");
+          await pool.query(
+            `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
+            [contentBytes, contentBytes.length, now, rel.id]
+          );
+          await recordChange({ itemId: rel.id, itemType: JOP_TYPE_NOTE_TAG, changeType: CHANGE_DELETED, jopId: rel.jop_id, userId, changeItemType: 2 });
+        }
+        const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(tag.content), deleted_time: now, user_updated_time: now }), "utf-8");
+        await pool.query(
+          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
+          [contentBytes, contentBytes.length, now, tag.id]
+        );
+        await recordChange({ itemId: tag.id, itemType: JOP_TYPE_TAG, changeType: CHANGE_DELETED, jopId: tag.jop_id, userId, changeItemType: 2 });
+        return { content: [{ type: "text" as const, text: `🗑️ Tag supprimé !\n🏷️ ${parsedTag.title}\n🆔 ID: ${tag.id}\n💡 ${alive.length} assignation(s) retirée(s) ; les notes sont intactes.` }] };
       } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
     }
   );
