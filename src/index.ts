@@ -617,7 +617,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.6.0" });
+  const server = new McpServer({ name: "joplin", version: "1.6.1" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -990,10 +990,17 @@ function createMcpServer(): McpServer {
         }
         const blocks = entries.map((entry: any) => {
           const lines: string[] = [`🕘 ${formatTimestamp(entry.at)}`];
-          const meta = entry.metadata && typeof entry.metadata === "object" ? entry.metadata : null;
-          if (meta) {
-            const changed = Object.keys(meta.new || {}).filter((k) => k !== "user_created_time");
+          // metadata_diff is stored as a JSON string, the two other diffs as JSON arrays
+          let meta: any = entry.metadata;
+          if (typeof meta === "string") {
+            try { meta = JSON.parse(meta); } catch { meta = null; }
+          }
+          if (meta && typeof meta === "object") {
+            const added = meta.new && typeof meta.new === "object" ? meta.new : {};
+            const trashed = Number(added.deleted_time || 0) > 0;
+            const changed = Object.keys(added).filter((k) => !["user_created_time", "deleted_time"].includes(k));
             const removed = Array.isArray(meta.deleted) ? meta.deleted : [];
+            if (trashed) lines.push("   🗑️ mise à la corbeille");
             if (changed.length) lines.push(`   champs: ${changed.join(", ")}`);
             if (removed.length) lines.push(`   supprimés: ${removed.join(", ")}`);
           }
