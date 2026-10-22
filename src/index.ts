@@ -519,7 +519,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.2.0" });
+  const server = new McpServer({ name: "joplin", version: "1.3.0" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -1191,6 +1191,113 @@ function createMcpServer(): McpServer {
               : `Aucun lien vers '${summary.title}' dans la note ${note.id}.`
           }]
         };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("delete_resource", "Delete a file attachment (resource): soft delete to the Joplin trash, same semantics as delete_note. The binary blob stays on the server until the trash is emptied from a client. Refuses when the resource is still linked from notes unless `force` is set (note bodies would keep dangling links).",
+    {
+      resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)"),
+      force: z.boolean().optional().describe("Delete even when still referenced by notes")
+    },
+    async ({ resource_id, force }) => {
+      try {
+        const userId = await getUserId();
+        const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
+        if (!row) return { content: [{ type: "text" as const, text: `Ressource '${resource_id}' non trouvée.` }] };
+        const summary = resourceSummary(row);
+        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Ressource '${summary.title}' est déjà dans la corbeille.` }] };
+        const refs = await pool.query(`SELECT item_id FROM item_resources WHERE resource_id = $1`, [row.jop_id]);
+        if (refs.rows.length > 0 && force !== true) {
+          const noteRows = await pool.query(`SELECT id, content FROM items WHERE id = ANY($1::text[])`, [refs.rows.map((r: any) => r.item_id)]);
+          const titles = noteRows.rows.map((r: any) => parseJoplinContent(r.content).title || r.id);
+          return {
+            content: [{
+              type: "text" as const,
+              text: `⚠️ Ressource '${summary.title}' encore référencée par ${refs.rows.length} note(s) : ${titles.join(", ")}.\n` +
+                `Fais d'abord unlink_resource_from_note, ou relance avec force=true.`
+            }]
+          };
+        }
+        const now = Date.now();
+        const json = { ...parseRawJson(row.content), deleted_time: now, user_updated_time: now };
+        const contentBytes = Buffer.from(JSON.stringify(json), "utf-8");
+        await pool.query(
+          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
+          [contentBytes, contentBytes.length, now, row.id]
+        );
+        await recordChange({ itemId: row.id, itemType: JOP_TYPE_RESOURCE, changeType: CHANGE_DELETED, jopId: row.jop_id, userId, changeItemType: 2 });
+        const linksNote = refs.rows.length > 0 ? `\n💡 ${refs.rows.length} lien(s) restent dans les corps de notes (rendu = pièce manquante).` : "";
+        return {
+          content: [{
+            type: "text" as const,
+            text: `🗑️ Pièce jointe mise à la corbeille !\n📎 ${summary.title}\n🆔 ID: ${summary.id}\n💡 Le binaire reste sur le serveur jusqu'à la purge de la corbeille.${linksNote}`
+          }]
+        };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("list_trash", "List the items currently sitting in the Joplin trash: notes and resources deleted but not purged. Use `restore_item` to bring one back.",
+    {
+      kind: z.enum(["all", "notes", "resources"]).default("all").describe("Restrict the listing to notes, resources, or both"),
+      limit: z.number().default(50).describe("Max items to return")
+    },
+    async ({ kind, limit }) => {
+      try {
+        const userId = await getUserId();
+        const types = kind === "notes" ? [JOP_TYPE_NOTE] : kind === "resources" ? [JOP_TYPE_RESOURCE] : [JOP_TYPE_NOTE, JOP_TYPE_RESOURCE];
+        const rows = await pool.query(
+          `SELECT id, name, content, jop_id, jop_type, content_size, updated_time
+           FROM items
+           WHERE owner_id = $1 AND jop_type = ANY($2::int[])
+             AND encode(content, 'escape') ~ '"deleted_time"[[:space:]]*:[[:space:]]*[1-9]'
+           ORDER BY updated_time DESC LIMIT $3`,
+          [userId, types, Math.min(limit, 200)]
+        );
+        const items = (rows.rows as JoplinItemRow[])
+          .map((row) => {
+            const json = parseRawJson(row.content);
+            return {
+              id: row.id,
+              jopId: row.jop_id,
+              type: row.jop_type === JOP_TYPE_NOTE ? "note" : "ressource",
+              title: String(json.title || "(sans titre)"),
+              deletedAt: formatTimestamp(Number(json.deleted_time || 0)),
+              size: Number(json.size || 0)
+            };
+          })
+          .filter((i) => i.deletedAt !== "N/A");
+        if (items.length === 0) return { content: [{ type: "text" as const, text: "La corbeille est vide." }] };
+        const lines = items.map((i) =>
+          `🗑️ **${i.title}** (${i.type})\n   ID: ${i.id} · jop_id: ${i.jopId} · supprimé le ${i.deletedAt}${i.type === "ressource" ? ` · ${formatBytes(i.size)}` : ""}`
+        );
+        return { content: [{ type: "text" as const, text: `🗑️ Corbeille (${items.length}):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("restore_item", "Restore an item from the Joplin trash (note or resource): clears deleted_time and records an update so synced clients bring it back. The original ids (and therefore the note links) are preserved.",
+    { item_id: z.string().describe("The note or resource ID (MCP id or Joplin 32-hex id)") },
+    async ({ item_id }) => {
+      try {
+        const userId = await getUserId();
+        const row = (await findItem(item_id, JOP_TYPE_NOTE, userId)) || (await findItem(item_id, JOP_TYPE_RESOURCE, userId));
+        if (!row) return { content: [{ type: "text" as const, text: `Élément '${item_id}' non trouvé (ni note ni ressource).` }] };
+        const json = parseRawJson(row.content);
+        const title = String(json.title || "(sans titre)");
+        if (!(Number(json.deleted_time || 0) > 0)) {
+          return { content: [{ type: "text" as const, text: `« ${title} » n'est pas dans la corbeille.` }] };
+        }
+        const now = Date.now();
+        const contentBytes = Buffer.from(JSON.stringify({ ...json, deleted_time: 0, user_updated_time: now }), "utf-8");
+        await pool.query(
+          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
+          [contentBytes, contentBytes.length, now, row.id]
+        );
+        await recordChange({ itemId: row.id, itemType: row.jop_type, changeType: CHANGE_UPDATED, jopId: row.jop_id, userId, changeItemType: 1 });
+        const kindLabel = row.jop_type === JOP_TYPE_NOTE ? "Note" : "Pièce jointe";
+        return { content: [{ type: "text" as const, text: `♻️ ${kindLabel} restaurée !\n📄 ${title}\n🆔 ID: ${row.id}` }] };
       } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
     }
   );
