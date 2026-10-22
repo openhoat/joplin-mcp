@@ -617,7 +617,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.6.1" });
+  const server = new McpServer({ name: "joplin", version: "1.6.2" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -998,10 +998,16 @@ function createMcpServer(): McpServer {
           if (meta && typeof meta === "object") {
             const added = meta.new && typeof meta.new === "object" ? meta.new : {};
             const trashed = Number(added.deleted_time || 0) > 0;
+            // The first history entry of an item dumps the whole record: no point listing 24 fields
+            const isCreation = Boolean(added.id) && Number(added.created_time || 0) > 0;
             const changed = Object.keys(added).filter((k) => !["user_created_time", "deleted_time"].includes(k));
             const removed = Array.isArray(meta.deleted) ? meta.deleted : [];
             if (trashed) lines.push("   🗑️ mise à la corbeille");
-            if (changed.length) lines.push(`   champs: ${changed.join(", ")}`);
+            if (isCreation) {
+              lines.push("   📄 création (état initial de l'élément)");
+            } else if (changed.length) {
+              lines.push(`   champs: ${changed.slice(0, 8).join(", ")}${changed.length > 8 ? ` … (${changed.length} au total)` : ""}`);
+            }
             if (removed.length) lines.push(`   supprimés: ${removed.join(", ")}`);
           }
           const titleDiff = renderHistoryDiff(entry.title);
