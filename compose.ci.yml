@@ -1,0 +1,15 @@
+# CI overrides for compose.yml: PostgreSQL is published on loopback so
+# the end-to-end suite can inspect the rows it wrote (write shapes, residue
+# check). The Joplin and MCP ports keep their defaults (22300, 8000); override
+# them with JOPLIN_APP_PORT and MCP_HOST_PORT if they are taken locally.
+#
+#   POSTGRES_PASSWORD=... MCP_API_KEY=... \
+#     docker compose -f compose.yml -f compose.ci.yml up -d --build
+#   docker compose -f compose.yml -f compose.ci.yml down -v
+#
+# Everything is discarded by `down -v`: no state outlives a run.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${E2E_DB_PORT:-15432}:5432"

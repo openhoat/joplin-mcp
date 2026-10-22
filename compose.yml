@@ -1,0 +1,67 @@
+# Quick start stack: PostgreSQL, Joplin Server and the MCP server.
+#
+#   cp .env.example .env        # set POSTGRES_PASSWORD and MCP_API_KEY
+#   docker compose up -d --build
+#
+# The MCP server writes to the same PostgreSQL database that Joplin Server syncs
+# to; it never goes through the Joplin API. CI starts this file with the
+# overrides in compose.ci.yml and runs the end-to-end suite against it, so the
+# documented quick start and the tested stack are the same file.
+
+name: joplin-mcp
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: joplin
+      POSTGRES_USER: joplin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U joplin -d joplin"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  joplin:
+    image: joplin/server:3.7.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_PORT: "22300"
+      APP_BASE_URL: ${JOPLIN_BASE_URL:-http://localhost:22300}
+      DB_CLIENT: pg
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DATABASE: joplin
+      POSTGRES_USER: joplin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    ports:
+      - "${JOPLIN_APP_PORT:-22300}:22300"
+
+  joplin-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: joplin-mcp:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      JOPLIN_DB_HOST: postgres
+      JOPLIN_DB_NAME: joplin
+      JOPLIN_DB_USER: joplin
+      JOPLIN_DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      MCP_API_KEY: ${MCP_API_KEY:?set MCP_API_KEY}
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-http://localhost:8000}
+      # Optional: pin the Joplin account the server acts for, otherwise the
+      # oldest account is used. See SELECT id, email FROM users ORDER BY created_time;
+      JOPLIN_USER_ID: ${JOPLIN_USER_ID:-}
+    ports:
+      - "${MCP_HOST_PORT:-8000}:8000"
+
+volumes:
+  pgdata:
