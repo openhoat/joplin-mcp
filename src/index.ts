@@ -38,7 +38,7 @@ const RESOURCE_BLOB_PREFIX = ".resource/";
 const DEFAULT_INLINE_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const HARD_INLINE_DOWNLOAD_MAX_BYTES = 32 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
-const MCP_JSON_LIMIT = "40mb";
+const MCP_JSON_LIMIT = "48mb";
 
 const pool = new Pool({
   host: DB_HOST, port: DB_PORT, database: DB_NAME,
