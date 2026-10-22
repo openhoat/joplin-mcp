@@ -1,6 +1,6 @@
 {
   "name": "joplin-mcp-server",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Joplin MCP Server",
   "type": "module",
   "main": "dist/index.js",
