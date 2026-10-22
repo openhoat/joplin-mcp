@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-10-22
+
+### Changed
+
+- The PostgreSQL layer is behind a seam: `src/store/` owns the connection, the row primitives
+  (`recordChange`, `recordUserItem`, `findItem`) and one module per aggregate (notes, notebooks,
+  resources, tags, trash, history). Handlers receive the `Store` interface and never hold a `pg`
+  pool, so a tool module can be exercised with a fake store.
+- The 37 tools are split by domain in `src/tools/` (`notes`, `notebooks`, `attachments`, `tags`,
+  `trash`, `history`); `src/index.ts` is now the composition root (configuration, store, tool
+  registration, HTTP surface) instead of a 2 600-line monolith.
+- No behaviour change: every tool name, description, argument schema and message is identical, and
+  `docs/sync-shapes.md` remains the contract for the writes. The end-to-end suite, run against the
+  compose stack, passes unchanged; the paths it does not cover were exercised by hand on the same
+  stack (notebook tree, rename and move, tag lifecycle, trash and restore, history, binary
+  transfer).
+
 ## [1.11.0] - 2026-10-22
 
 ### Added

@@ -264,9 +264,19 @@ dates, history diffs, ids and markdown links. That is where the Joplin shapes li
 regression is cheapest to catch. Coverage thresholds apply to it and ratchet up as the handlers move
 behind testable seams ([KANBAN.md](KANBAN.md)).
 
-The handlers talk to PostgreSQL directly and are never mocked: a fake pool would only assert that
-the mock was called. `src/test/e2e/` drives the real stack instead — the HTTP transport, the writes
-and the rows they must produce.
+```text
+src/
+  index.ts        composition root: configuration, store, tool registration, HTTP surface
+  config.ts       environment and size limits
+  store/          the database seam: connection, core primitives, one module per aggregate
+  tools/          the 37 MCP tools, one module per domain (notes, notebooks, attachments, ...)
+  lib/            pure layer, no I/O: the Joplin shapes live here
+```
+
+No handler ever holds a `pg` pool: each tool module receives the `Store` interface
+(`src/store/index.ts`), so a handler can be exercised with a fake store and no database. The SQL
+itself is not mocked — a fake pool would only assert that the mock was called — `src/test/e2e/`
+drives the real stack instead: the HTTP transport, the writes and the rows they must produce.
 
 ```bash
 docker compose -f compose.yml -f compose.ci.yml up -d --build

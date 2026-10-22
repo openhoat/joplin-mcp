@@ -5,14 +5,11 @@ lives in [CHANGELOG.md](CHANGELOG.md) and `git log`.
 
 ## Backlog
 
-### #4 [REFACTOR] Split the monolith
+### #7 [TEST] Handler-level tests on a fake store
 
-- [x] move the pure layer to `src/lib/`: content, format, todo, history, ids, markdown, resource,
-      types (`src/index.ts` is down to ~1 970 lines)
-- [ ] extract the PostgreSQL layer (`pool`, `recordChange`, `findItem`, resource read/write) behind a
-      seam so the handlers become testable without a database
-- [ ] split the tools by domain (`notes`, `notebooks`, `attachments`, `tags`, `trash`, `history`)
-- [ ] keep the behaviour and every tool schema identical; `docs/sync-shapes.md` stays the reference
+- [ ] the store seam exists (`src/store/index.ts`), so a tool module can now run against an in-memory
+      store: cover the argument validation and the message formatting of a few handlers without Docker
+- [ ] keep `src/test/e2e/` as the reference for the SQL itself
 
 ### #6 [DISTRIBUTION] Publish what is already built
 
