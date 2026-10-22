@@ -11,6 +11,10 @@ history — 37 tools over the Model Context Protocol, one container, one databas
 > changes. It bypasses the sync API and the encryption layer by design: **back up your database
 > before pointing it at real notes.**
 
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![node: 20+](https://img.shields.io/badge/node-20%2B-green.svg)](Dockerfile)
+[![MCP: streamable-http](https://img.shields.io/badge/MCP-streamable--http-8A2BE2.svg)](https://modelcontextprotocol.io)
+
 ## Why not the Joplin API?
 
 - The **Web Clipper API** is served by the desktop app: unreachable from a server, and only a
@@ -112,6 +116,10 @@ volumes:
 cp .env.example .env    # set POSTGRES_PASSWORD and MCP_API_KEY, then:
 docker compose up -d
 ```
+
+Generate the API key with `openssl rand -hex 32`: the server **refuses to start** without a real
+key (an empty value or the `change-me` placeholder is rejected), because it writes to your notes
+database.
 
 Create the Joplin account at <http://localhost:22300> (the server seeds an admin account on first
 start), and **point the MCP server at that user**:
@@ -257,20 +265,21 @@ videos, slide decks and archives in and out.
 
 ## Configuration
 
-| Variable             | Default               | Description                                                                              |
-| -------------------- | --------------------- | ---------------------------------------------------------------------------------------- |
-| `JOPLIN_DB_HOST`     | `pgsql`               | PostgreSQL host                                                                          |
-| `JOPLIN_DB_PORT`     | `5432`                | PostgreSQL port                                                                          |
-| `JOPLIN_DB_NAME`     | `joplin`              | Database name                                                                            |
-| `JOPLIN_DB_USER`     | `postgres`            | Database user — needs read/write on `items`, `changes_2`, `user_items`, `item_resources` |
-| `JOPLIN_DB_PASSWORD` | `postgres`            | Database password                                                                        |
-| `JOPLIN_USER_ID`     | first user            | Joplin account the server acts for (see the `users` query above)                         |
-| `MCP_API_KEY`        | *(empty)*             | Bearer key required on every route except `/health` and `/`                              |
-| `MCP_PORT`           | `8000`                | HTTP listening port                                                                      |
-| `MCP_PUBLIC_URL`     | maintainer's instance | Base URL advertised in tool output and download links — set it explicitly                |
+| Variable             | Default                   | Description                                                                              |
+| -------------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
+| `JOPLIN_DB_HOST`     | `pgsql`                   | PostgreSQL host                                                                          |
+| `JOPLIN_DB_PORT`     | `5432`                    | PostgreSQL port                                                                          |
+| `JOPLIN_DB_NAME`     | `joplin`                  | Database name                                                                            |
+| `JOPLIN_DB_USER`     | `postgres`                | Database user — needs read/write on `items`, `changes_2`, `user_items`, `item_resources` |
+| `JOPLIN_DB_PASSWORD` | `postgres`                | Database password                                                                        |
+| `JOPLIN_USER_ID`     | first user                | Joplin account the server acts for (see the `users` query above)                         |
+| `MCP_API_KEY`        | **required**              | Bearer key on every route except `/health` and `/`; the server will not start without it |
+| `MCP_PORT`           | `8000`                    | HTTP listening port                                                                      |
+| `MCP_PUBLIC_URL`     | `http://localhost:<port>` | Base URL advertised in tool output and download links — set it behind a proxy            |
 
-> Leaving `MCP_API_KEY` empty disables authentication. Keep it set on anything reachable from
-> outside `localhost` (hardening is tracked in [KANBAN.md](KANBAN.md)).
+> The server is **fail closed**: with no `MCP_API_KEY` it exits at startup. Tokens are compared
+> through their SHA-256 digests with `crypto.timingSafeEqual`. `/health` and `/` stay public so a
+> container healthcheck needs no secret.
 
 ## How writes work
 
@@ -305,6 +314,16 @@ restore of a history version.
 ## Roadmap
 
 Open work only, in [KANBAN.md](KANBAN.md); released history in [CHANGELOG.md](CHANGELOG.md).
+
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). For anything that
+touches the database, `docs/sync-shapes.md` is the contract: verify a shape against a real client
+before implementing it.
+
+## Security
+
+Report a vulnerability privately rather than in a public issue — see [SECURITY.md](SECURITY.md).
 
 ## License
 

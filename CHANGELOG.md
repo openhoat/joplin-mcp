@@ -4,28 +4,44 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 1.6.3 (2026-10-22)
+## [1.8.0] - 2026-10-22
+
+### Changed
+
+- **Breaking** — the server refuses to start without a real `MCP_API_KEY`: an empty value or the
+  `change-me` placeholder exits with an explicit message. Until now an empty key silently disabled
+  authentication on a process that reads and writes the notes database.
+- `MCP_PUBLIC_URL` defaults to `http://localhost:<port>` and `build.sh` defaults to
+  `ghcr.io/openhoat`, instead of pointing at the maintainer's private instance and registry.
+
+### Security
+
+- Bearer tokens are compared through SHA-256 digests with `crypto.timingSafeEqual`, which removes the
+  early-exit comparison and the token-length leak. `/health` and `/` stay public for healthchecks,
+  every other route (including the `/files` binary transfer) requires the key.
+
+## [1.6.3] - 2026-10-22
 
 ### Fixed
 
 - `get_note_history`: a creation entry is detected by the `id` field of its metadata diff (the
   creation diff carries no `created_time`), so it is summarised instead of listing 22 raw fields.
 
-## 1.6.2 (2026-10-22)
+## [1.6.2] - 2026-10-22
 
 ### Fixed
 
 - `get_note_history`: the creation entry of an item is collapsed into one line, and long field
   lists are truncated, instead of dumping the whole record on every note.
 
-## 1.6.1 (2026-10-22)
+## [1.6.1] - 2026-10-22
 
 ### Fixed
 
 - `get_note_history`: `metadata_diff` is stored as a JSON string while `title_diff` and
   `body_diff` are arrays; each diff is now parsed defensively, so the changed fields are reported.
 
-## 1.6.0 (2026-10-22)
+## [1.6.0] - 2026-10-22
 
 ### Added
 
@@ -40,7 +56,7 @@ All notable changes to this project are documented in this file. The format foll
 - `docs/sync-shapes.md`: folder hierarchy (parent stored twice) and note history shapes (item id,
   three different diff encodings, no history for direct database writes).
 
-## 1.5.0 (2026-10-22)
+## [1.5.0] - 2026-10-22
 
 ### Added
 
@@ -53,14 +69,14 @@ All notable changes to this project are documented in this file. The format foll
 - `docs/sync-shapes.md`: the in-place replacement shape (metadata refresh, blob row update, one
   update event per row).
 
-## 1.4.1 (2026-10-22)
+## [1.4.1] - 2026-10-22
 
 ### Fixed
 
 - Note updates write `changes_2.item_type = 1`, as real clients do on update (2 136 desktop rows at
   1 against 135 at 2 before the fix), on `update_note` and on the body updates driven by attachments.
 
-## 1.4.0 (2026-10-22)
+## [1.4.0] - 2026-10-22
 
 ### Added
 
@@ -69,7 +85,7 @@ All notable changes to this project are documented in this file. The format foll
 - Tags: complete management — `list_notes_with_tag`, `rename_tag` (id kept, assignments survive)
   and `delete_tag` (trashes the tag and its assignments, never the notes).
 
-## 1.3.0 (2026-10-22)
+## [1.3.0] - 2026-10-22
 
 ### Added
 
@@ -85,7 +101,7 @@ All notable changes to this project are documented in this file. The format foll
 - `item_resources` insert: explicit `$1::varchar` cast, the type inference silently dropped the row.
 - `bigint` timestamps are coerced before being formatted (the driver returns strings).
 
-## 1.2.0 (2026-10-22)
+## [1.2.0] - 2026-10-22
 
 ### Added
 
@@ -94,8 +110,20 @@ All notable changes to this project are documented in this file. The format foll
   and `POST /files` binary routes (256 MB, same Bearer key as `/mcp`).
 - Tags: `list_tags`, `add_tag`, `list_note_tags`, `attach_tag_to_note`, `detach_tag_from_note`.
 
-## 1.1.1 (2026-10-22)
+## [1.1.1] - 2026-10-22
 
 ### Changed
 
 - Imported from the `docker-stacks` monorepo into a dedicated repository, unchanged.
+
+[1.8.0]: https://github.com/openhoat/joplin-mcp/compare/v1.6.3...v1.8.0
+[1.6.3]: https://github.com/openhoat/joplin-mcp/compare/v1.6.2...v1.6.3
+[1.6.2]: https://github.com/openhoat/joplin-mcp/compare/v1.6.1...v1.6.2
+[1.6.1]: https://github.com/openhoat/joplin-mcp/compare/v1.6.0...v1.6.1
+[1.6.0]: https://github.com/openhoat/joplin-mcp/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/openhoat/joplin-mcp/compare/v1.4.1...v1.5.0
+[1.4.1]: https://github.com/openhoat/joplin-mcp/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/openhoat/joplin-mcp/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/openhoat/joplin-mcp/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/openhoat/joplin-mcp/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/openhoat/joplin-mcp/releases/tag/v1.1.1
