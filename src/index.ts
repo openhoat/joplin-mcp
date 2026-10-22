@@ -34,6 +34,11 @@ const JOP_TYPE_NOTE_TAG = 6;
  */
 const JOP_TYPE_BLOB = 0;
 const RESOURCE_BLOB_PREFIX = ".resource/";
+/**
+ * Server-side note history entries: written by Joplin Server on every item save,
+ * never by us. Read-only (`get_note_history`).
+ */
+const JOP_TYPE_HISTORY = 13;
 
 const DEFAULT_INLINE_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const HARD_INLINE_DOWNLOAD_MAX_BYTES = 32 * 1024 * 1024;
@@ -78,6 +83,34 @@ function parseDueDate(value: string | number | null | undefined): number | undef
   if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10);
   const parsed = Date.parse(trimmed);
   return Number.isNaN(parsed) ? NaN : parsed;
+}
+
+/**
+ * Joplin stores note history changes as diff-match-patch hunks, not as text: an array of
+ * `{ diffs: [[op, text], ...], start1, length1, start2, length2 }` where op 1 = inserted,
+ * -1 = deleted and 0 = unchanged. Keep the changed fragments only, they read like a patch.
+ */
+function renderHistoryDiff(raw: any, maxChars = 240): string[] {
+  if (!raw) return [];
+  let hunks = raw;
+  if (typeof hunks === "string") {
+    try { hunks = JSON.parse(hunks); } catch { return [String(hunks).slice(0, maxChars)]; }
+  }
+  if (!Array.isArray(hunks)) return [];
+  const lines: string[] = [];
+  for (const hunk of hunks) {
+    const parts = Array.isArray(hunk?.diffs) ? hunk.diffs : [];
+    for (const part of parts) {
+      const op = Number(Array.isArray(part) ? part[0] : NaN);
+      const text = String(Array.isArray(part) ? part[1] ?? "" : "");
+      if (!text.trim()) continue;
+      const label = op === 1 ? "+" : op === -1 ? "-" : null;
+      if (!label) continue;
+      const clean = text.replace(/\s+/g, " ").trim();
+      lines.push(`${label} ${clean.length > maxChars ? `${clean.slice(0, maxChars)}…` : clean}`);
+    }
+  }
+  return lines;
 }
 
 function readContent(raw: Buffer | string | null): string {
@@ -584,7 +617,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.5.0" });
+  const server = new McpServer({ name: "joplin", version: "1.6.0" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -834,6 +867,148 @@ function createMcpServer(): McpServer {
         });
         const header = status === "done" ? "faits" : status === "open" ? "à faire" : "tous";
         return { content: [{ type: "text" as const, text: `☑️ Todos (${todos.length} ${header}, ${shown.length} affichés):\n\n${lines.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("get_notebook_tree", "Show the notebook hierarchy as an indented tree, with a note count per notebook. `list_notebooks` returns a flat list, which hides the parent links — use this one before creating or moving a notebook when nesting matters.",
+    {},
+    async () => {
+      try {
+        const userId = await getUserId();
+        const folders = await pool.query(
+          `SELECT id, jop_id, jop_parent_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`,
+          [userId, JOP_TYPE_FOLDER]
+        );
+        const notes = await pool.query(`SELECT content, jop_parent_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE]);
+        const counts = new Map<string, number>();
+        for (const row of notes.rows as JoplinItemRow[]) {
+          if (parseJoplinContent(row.content).isDeleted) continue;
+          const parent = String(row.jop_parent_id || "");
+          counts.set(parent, (counts.get(parent) || 0) + 1);
+        }
+        const nodes = (folders.rows as JoplinItemRow[])
+          .map((row) => {
+            const parsed = parseJoplinContent(row.content);
+            return { id: row.id, jopId: String(row.jop_id), parent: String(row.jop_parent_id || ""), title: parsed.title, deleted: parsed.isDeleted };
+          })
+          .filter((n) => !n.deleted);
+        if (nodes.length === 0) return { content: [{ type: "text" as const, text: "Aucun carnet." }] };
+        const byJop = new Map(nodes.map((n) => [n.jopId, n]));
+        const children = new Map<string, typeof nodes>();
+        const roots: typeof nodes = [];
+        for (const node of nodes) {
+          const parent = node.parent && byJop.has(node.parent) ? node.parent : "";
+          if (!parent) { roots.push(node); continue; }
+          const bucket = children.get(parent) || [];
+          bucket.push(node);
+          children.set(parent, bucket);
+        }
+        const lines: string[] = [];
+        const walk = (list: typeof nodes, depth: number) => {
+          for (const node of [...list].sort((a, b) => a.title.localeCompare(b.title))) {
+            const count = counts.get(node.jopId) || 0;
+            const branch = depth === 0 ? "📂" : `${"   ".repeat(depth - 1)}└─`;
+            lines.push(`${branch} ${node.title} · ${count} note(s) · ID: ${node.id}`);
+            walk(children.get(node.jopId) || [], depth + 1);
+          }
+        };
+        walk(roots, 0);
+        return { content: [{ type: "text" as const, text: `🌳 Carnets (${nodes.length}):\n\n${lines.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("list_conflicted_notes", "List the notes Joplin flagged as sync conflicts (`is_conflict`), most recently updated first. Useful to triage what a sync clash left behind; resolve by merging the bodies with `update_note`.",
+    { limit: z.number().default(20).describe("Max notes to return") },
+    async ({ limit }) => {
+      try {
+        const userId = await getUserId();
+        const rows = await pool.query(
+          `SELECT id, content, jop_parent_id, updated_time FROM items
+           WHERE owner_id = $1 AND jop_type = $2
+             AND encode(content, 'escape') ~ '"is_conflict"[[:space:]]*:[[:space:]]*1'
+           ORDER BY updated_time DESC LIMIT $3`,
+          [userId, JOP_TYPE_NOTE, Math.min(limit, 200)]
+        );
+        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_FOLDER]);
+        const folderTitles = new Map<string, string>();
+        for (const f of folders.rows as JoplinItemRow[]) folderTitles.set(String(f.jop_id), parseJoplinContent(f.content).title);
+        const notes = (rows.rows as JoplinItemRow[])
+          .map((row) => {
+            const parsed = parseJoplinContent(row.content);
+            const json = parsed.json || {};
+            return {
+              id: row.id,
+              title: parsed.title,
+              deleted: parsed.isDeleted,
+              originalId: String(json.conflict_original_id || ""),
+              notebook: folderTitles.get(String(row.jop_parent_id)) || "",
+              updated: Number(row.updated_time)
+            };
+          })
+          .filter((n) => !n.deleted);
+        if (notes.length === 0) return { content: [{ type: "text" as const, text: "Aucune note en conflit." }] };
+        const lines = notes.map((n) =>
+          `⚠️ **${n.title}**\n   ID: ${n.id}${n.notebook ? ` · carnet: ${n.notebook}` : ""} · maj ${formatTimestamp(n.updated)}${n.originalId ? ` · original: ${n.originalId}` : ""}`
+        );
+        return { content: [{ type: "text" as const, text: `⚠️ Notes en conflit (${notes.length}):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("get_note_history", "Read the server-side note history: every recorded change entry for a note (when, which metadata fields changed, title and body edits). Read-only — to roll back, take the text from an entry and call `update_note`.",
+    {
+      note_id: z.string().describe("The ID of the note (MCP id or Joplin 32-hex id)"),
+      limit: z.number().default(10).describe("Max history entries, most recent first")
+    },
+    async ({ note_id, limit }) => {
+      try {
+        const userId = await getUserId();
+        const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
+        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        const rows = await pool.query(
+          `SELECT id, content, updated_time FROM items
+           WHERE owner_id = $1 AND jop_type = $2 AND encode(content, 'escape') LIKE $3`,
+          [userId, JOP_TYPE_HISTORY, `%"item_id":"${note.jop_id}"%`]
+        );
+        const entries = rows.rows
+          .map((row: any) => {
+            const json = parseRawJson(row.content);
+            return {
+              at: Number(json.item_updated_time || row.updated_time),
+              metadata: json.metadata_diff,
+              title: json.title_diff,
+              body: json.body_diff
+            };
+          })
+          .filter((entry: any) => Number(entry.at) > 0)
+          .sort((a: any, b: any) => b.at - a.at)
+          .slice(0, Math.min(limit, 100));
+        if (entries.length === 0) {
+          return { content: [{ type: "text" as const, text: `Aucun historique serveur pour « ${parseJoplinContent(note.content).title} ».` }] };
+        }
+        const blocks = entries.map((entry: any) => {
+          const lines: string[] = [`🕘 ${formatTimestamp(entry.at)}`];
+          const meta = entry.metadata && typeof entry.metadata === "object" ? entry.metadata : null;
+          if (meta) {
+            const changed = Object.keys(meta.new || {}).filter((k) => k !== "user_created_time");
+            const removed = Array.isArray(meta.deleted) ? meta.deleted : [];
+            if (changed.length) lines.push(`   champs: ${changed.join(", ")}`);
+            if (removed.length) lines.push(`   supprimés: ${removed.join(", ")}`);
+          }
+          const titleDiff = renderHistoryDiff(entry.title);
+          if (titleDiff.length) lines.push(`   titre: ${titleDiff.slice(0, 3).join(" | ")}`);
+          const bodyDiff = renderHistoryDiff(entry.body);
+          if (bodyDiff.length) lines.push(`   corps:\n${bodyDiff.slice(0, 6).map((l: string) => `     ${l}`).join("\n")}`);
+          return lines.join("\n");
+        });
+        return {
+          content: [{
+            type: "text" as const,
+            text: `🕘 Historique de « ${parseJoplinContent(note.content).title} » (${entries.length} entrées):\n\n${blocks.join("\n\n")}`
+          }]
+        };
       } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
     }
   );
@@ -1126,6 +1301,78 @@ function createMcpServer(): McpServer {
         if (title !== undefined) changes.push(`📂 ${parsed.title} → ${title}`);
         if (icon !== undefined) changes.push(`🎨 Icône: ${icon.emoji}`);
         return { content: [{ type: "text" as const, text: `✅ Carnet mis à jour !\n${changes.join("\n")}\n🆔 ID: ${notebook_id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
+  server.tool("move_notebook", "Move a notebook under another notebook, or back to the root with an empty parent_id. Refuses to nest a notebook inside itself or one of its descendants.",
+    {
+      notebook_id: z.string().describe("The ID of the notebook to move"),
+      parent_id: z.string().describe("Target notebook ID, or an empty string to move it to the root")
+    },
+    async ({ notebook_id, parent_id }) => {
+      try {
+        const userId = await getUserId();
+        const row = await findItem(notebook_id, JOP_TYPE_FOLDER, userId);
+        if (!row) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' non trouvé.` }] };
+        const parsed = parseJoplinContent(row.content);
+        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Le carnet « ${parsed.title} » est dans la corbeille.` }] };
+        const targetId = parent_id.trim();
+        let targetJopId = "";
+        let targetTitle = "";
+        const folders = await pool.query(
+          `SELECT id, jop_id, jop_parent_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`,
+          [userId, JOP_TYPE_FOLDER]
+        );
+        const alive = (folders.rows as JoplinItemRow[])
+          .map((f) => ({
+            id: f.id,
+            jopId: String(f.jop_id),
+            parent: String(f.jop_parent_id || ""),
+            title: parseJoplinContent(f.content).title,
+            deleted: parseJoplinContent(f.content).isDeleted
+          }))
+          .filter((f) => !f.deleted);
+        if (targetId) {
+          const target = alive.find((f) => f.id === targetId || f.jopId === targetId);
+          if (!target) return { content: [{ type: "text" as const, text: `Carnet cible '${targetId}' non trouvé.` }] };
+          if (target.jopId === row.jop_id) return { content: [{ type: "text" as const, text: "Un carnet ne peut pas être son propre parent." }] };
+          // Walk down from the moved notebook: the target must not be one of its descendants
+          const childrenOf = new Map<string, typeof alive>();
+          for (const f of alive) {
+            const bucket = childrenOf.get(f.parent) || [];
+            bucket.push(f);
+            childrenOf.set(f.parent, bucket);
+          }
+          const seen = new Set<string>([row.jop_id]);
+          const stack = [row.jop_id];
+          while (stack.length) {
+            const current = stack.pop() as string;
+            for (const child of childrenOf.get(current) || []) {
+              if (seen.has(child.jopId)) continue;
+              seen.add(child.jopId);
+              stack.push(child.jopId);
+            }
+          }
+          if (seen.has(target.jopId)) {
+            return { content: [{ type: "text" as const, text: `Déplacement impossible : « ${target.title} » est un sous-carnet de « ${parsed.title} » (cycle).` }] };
+          }
+          targetJopId = target.jopId;
+          targetTitle = target.title;
+        }
+        const now = Date.now();
+        const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(row.content), parent_id: targetJopId, user_updated_time: now }), "utf-8");
+        await pool.query(
+          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3, jop_parent_id = $4 WHERE id = $5`,
+          [contentBytes, contentBytes.length, now, targetJopId, row.id]
+        );
+        await recordChange({ itemId: row.id, itemType: JOP_TYPE_FOLDER, changeType: CHANGE_UPDATED, jopId: row.jop_id, userId, changeItemType: 1 });
+        return {
+          content: [{
+            type: "text" as const,
+            text: `✅ Carnet déplacé !\n📂 ${parsed.title} → ${targetTitle || "racine"}\n🆔 ID: ${row.id}`
+          }]
+        };
       } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
     }
   );
