@@ -66,6 +66,13 @@ carries a markdown link `[label](:/<jop_id 32hex>)` (image: leading `!`).
 maintain it manually on attach/unlink. Postgres cannot infer parameter types across
 `INSERT … SELECT … WHERE NOT EXISTS`, so cast explicitly (`$1::varchar`).
 
+## Folder hierarchy
+
+A folder stores its parent **twice**: `parent_id` (the parent's jop_id) inside the body JSON, and
+the same value in the `jop_parent_id` column. Both must be written together when moving a folder
+(`move_notebook`); root folders keep `""` in both. Reading a tree means resolving `jop_parent_id`
+against the folders' own `jop_id`, since `items.id` is a different (MCP-facing) identifier.
+
 ## Tags
 
 Tag item (`jop_type=5`): `{user_data, is_shared, encryption_cipher_text, user_updated_time,
@@ -100,6 +107,19 @@ Written by the server on item saves: `{is_locked, created_time, encryption_ciphe
 metadata_diff, body_diff, title_diff, item_updated_time, item_id, item_type}`. Read-only for
 us (`get_note_history`); restoring means recomposing diffs — deliberately left to
 `update_note` instead.
+
+- `item_id` is the **item's jop_id** (32 hex), not the `items.id` primary key: match with
+  `encode(content, 'escape') LIKE '%"item_id":"<jop_id>"%'`.
+- The three diffs do not share a shape: `metadata_diff` is a **JSON string**
+  (`{"new":{…},"deleted":[…]}`), while `title_diff` and `body_diff` are JSON **arrays** of
+  diff-match-patch hunks (`[{diffs:[[op,text],…],start1,length1,start2,length2}]`, op 1 =
+  inserted, -1 = deleted, 0 = unchanged). Parse each one defensively.
+- A creation entry dumps the whole record in `metadata_diff.new` (22 keys, including `id`)
+  and carries no `created_time`; detect it by the presence of `id` and summarise instead of
+  listing the fields.
+- Direct PostgreSQL writes (what this server does) produce **no** history rows: they are a
+  trace of client syncs, so a note created through the MCP has no history until a client
+  saves it.
 
 ## Operational gotchas
 
