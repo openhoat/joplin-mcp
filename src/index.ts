@@ -412,6 +412,55 @@ function buildResourceLink(label: string, resourceJopId: string, asImage: boolea
 }
 
 /** Read the blob row holding the resource bytes. */
+/**
+ * Replace the binary content of an existing resource (metadata item + blob row).
+ * The resource id and jop_id are kept, so every `:/` link already written in note
+ * bodies keeps resolving — that is the whole point of a replace instead of an
+ * add/delete pair. Mirrors the desktop: new bytes in the blob row, `size` and
+ * `blob_updated_time` refreshed in the metadata, one update change per row
+ * (blob rows use the `.resource/<jop_id>` sync name and item_type 1 on update).
+ */
+async function replaceResourceContent(params: {
+  resource: JoplinItemRow;
+  data: Buffer;
+  mime?: string;
+  filename?: string;
+  userId: string;
+}): Promise<{ id: string; jopId: string; title: string; mime: string; sizeBefore: number; size: number }> {
+  const { resource, data, userId } = params;
+  const json = parseRawJson(resource.content);
+  const blob = await pool.query(
+    `SELECT id FROM items WHERE owner_id = $1 AND name = $2 LIMIT 1`,
+    [userId, `${RESOURCE_BLOB_PREFIX}${resource.jop_id}`]
+  );
+  if (blob.rows.length === 0) throw new Error("binaire introuvable pour cette ressource");
+  const now = Date.now();
+  const title = String(params.filename || json.title || "").trim() || "fichier";
+  const mime = params.mime || (params.filename ? guessMime(params.filename) : String(json.mime || guessMime(title)));
+  const meta = {
+    ...json,
+    title,
+    mime,
+    file_extension: fileExtensionFromName(title) || String(json.file_extension || ""),
+    size: data.length,
+    blob_updated_time: now,
+    user_updated_time: now
+  };
+  const metaBytes = Buffer.from(JSON.stringify(meta), "utf-8");
+  await pool.query(
+    `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
+    [metaBytes, metaBytes.length, now, resource.id]
+  );
+  // Blob rows keep jop_updated_time at 0, like the desktop writes them
+  await pool.query(
+    `UPDATE items SET content = $1, content_size = $2, updated_time = $3 WHERE id = $4`,
+    [data, data.length, now, blob.rows[0].id]
+  );
+  await recordChange({ itemId: blob.rows[0].id, itemType: JOP_TYPE_BLOB, changeType: CHANGE_UPDATED, jopId: resource.jop_id, userId, itemName: `${RESOURCE_BLOB_PREFIX}${resource.jop_id}`, changeItemType: 1 });
+  await recordChange({ itemId: resource.id, itemType: JOP_TYPE_RESOURCE, changeType: CHANGE_UPDATED, jopId: resource.jop_id, userId, changeItemType: 1 });
+  return { id: resource.id, jopId: resource.jop_id, title, mime, sizeBefore: Number(json.size || 0), size: data.length };
+}
+
 async function findResourceBlob(resourceJopId: string, userId: string): Promise<{ id: string; content: Buffer; content_size: number } | null> {
   const result = await pool.query(
     `SELECT id, content, content_size FROM items WHERE owner_id = $1 AND name = $2 LIMIT 1`,
@@ -535,7 +584,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.4.1" });
+  const server = new McpServer({ name: "joplin", version: "1.5.0" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -1360,6 +1409,37 @@ function createMcpServer(): McpServer {
     }
   );
 
+  server.tool("update_resource", "Replace the binary content of an existing attachment (new version of a file). Ids are preserved, so every link already present in note bodies keeps working. Inline base64 only (max 32 MiB); for bigger files use `PUT /files/<id>` with the raw body.",
+    {
+      resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)"),
+      data_base64: z.string().describe("New file content encoded in base64 (data: URL prefix accepted)"),
+      filename: z.string().optional().describe("Optional new file name (updates the resource title and extension)"),
+      mime_type: z.string().optional().describe("Optional MIME type (guessed from the file name when omitted)")
+    },
+    async ({ resource_id, data_base64, filename, mime_type }) => {
+      try {
+        const userId = await getUserId();
+        const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
+        if (!row) return { content: [{ type: "text" as const, text: `Pièce jointe '${resource_id}' non trouvée.` }] };
+        const summary = resourceSummary(row);
+        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `« ${summary.title} » est dans la corbeille : restaure-la avec restore_item avant de remplacer son contenu.` }] };
+        const cleaned = data_base64.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
+        const data = Buffer.from(cleaned, "base64");
+        if (data.length === 0) return { content: [{ type: "text" as const, text: "Erreur: contenu base64 vide ou invalide." }] };
+        if (data.length > HARD_INLINE_DOWNLOAD_MAX_BYTES) {
+          return { content: [{ type: "text" as const, text: `⚠️ Fichier trop volumineux pour un remplacement inline (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Utilise PUT /files/${summary.id}.` }] };
+        }
+        const result = await replaceResourceContent({ resource: row, data, mime: mime_type, filename, userId });
+        return {
+          content: [{
+            type: "text" as const,
+            text: `✅ Contenu remplacé !\n📎 ${result.title}\n🆔 ID: ${result.id}\n🔑 jop_id: ${result.jopId} (inchangé — les liens des notes restent valides)\n📦 ${formatBytes(result.sizeBefore)} → ${formatBytes(result.size)} · ${result.mime}`
+          }]
+        };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+    }
+  );
+
   server.tool("list_trash", "List the items currently sitting in the Joplin trash: notes and resources deleted but not purged. Use `restore_item` to bring one back.",
     {
       kind: z.enum(["all", "notes", "resources"]).default("all").describe("Restrict the listing to notes, resources, or both"),
@@ -1855,6 +1935,35 @@ async function main() {
       });
     } catch (e: any) {
       console.error("POST /files error:", e);
+      if (!res.headersSent) res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put("/files/:id", express.raw({ type: () => true, limit: MAX_UPLOAD_BYTES }), async (req, res) => {
+    try {
+      const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (data.length === 0) { res.status(400).json({ error: "Empty request body" }); return; }
+      const userId = await getUserId();
+      const row = await findItem(String(req.params.id), JOP_TYPE_RESOURCE, userId);
+      if (!row) { res.status(404).json({ error: "Resource not found" }); return; }
+      const summary = resourceSummary(row);
+      if (summary.isDeleted) { res.status(409).json({ error: "Resource is in the trash: restore it first" }); return; }
+      const filename = String(req.query.filename || (req.headers["x-filename"] as string) || "").trim() || undefined;
+      const contentType = String(req.headers["content-type"] || "").split(";")[0].trim();
+      const mime = req.query.mime ? String(req.query.mime) : contentType || undefined;
+      const result = await replaceResourceContent({ resource: row, data, mime, filename, userId });
+      res.json({
+        ok: true,
+        id: result.id,
+        jop_id: result.jopId,
+        title: result.title,
+        mime: result.mime,
+        size: result.size,
+        previous_size: result.sizeBefore,
+        download_url: `${MCP_PUBLIC_URL}/files/${result.id}`
+      });
+    } catch (e: any) {
+      console.error("PUT /files error:", e);
       if (!res.headersSent) res.status(500).json({ error: e.message });
     }
   });
