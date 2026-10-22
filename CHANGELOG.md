@@ -14,6 +14,8 @@ All notable changes to this project are documented in this file. The format foll
 - Failures are now flagged with `isError: true` (96 return paths) instead of being plain results, so
   an agent can tell "the note does not exist" from "the search returned nothing".
 - Sizes use English units (`B`, `KB`, `MB`) and todo lines use `[ ]` / `[x]` instead of pictograms.
+- `create_note` prints the destination notebook title instead of its raw `jop_id`, so a caller can
+  check where the note landed without a second lookup.
 
 ## [1.8.0] - 2026-10-22
 

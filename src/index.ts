@@ -1076,7 +1076,13 @@ function createMcpServer(): McpServer {
         await recordUserItem({ itemId: noteId, userId });
         // Record change so Joplin Server pushes it to synced clients
         await recordChange({ itemId: noteId, itemType: JOP_TYPE_NOTE, changeType: CHANGE_CREATED, jopId, userId });
-        return { content: [{ type: "text" as const, text: `Note created: **${title}**\nID: ${noteId}\nNotebook: ${parentJopId || "default"}` }] };
+        // Resolve the notebook title: a raw jop_id tells the caller nothing
+        let notebookLabel = "default";
+        if (parentJopId) {
+          const nb = await pool.query(`SELECT content FROM items WHERE jop_id = $1 AND jop_type = $2`, [parentJopId, JOP_TYPE_FOLDER]);
+          notebookLabel = nb.rows.length > 0 ? parseJoplinContent(nb.rows[0].content).title || parentJopId : parentJopId;
+        }
+        return { content: [{ type: "text" as const, text: `Note created: **${title}**\nID: ${noteId}\nNotebook: ${notebookLabel}` }] };
       } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
