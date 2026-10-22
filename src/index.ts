@@ -1,44 +1,57 @@
 #!/usr/bin/env node
+
 /**
  * Joplin MCP Server - Access Joplin notes via PostgreSQL direct access.
  * Uses the official MCP SDK with per-connection server instances.
  * Supports Joplin v3 JSON content format.
  */
 
+import * as crypto from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { z } from "zod";
 import express from "express";
 import { Pool } from "pg";
-import * as crypto from "crypto";
+import { z } from "zod";
+import {
+  buildIconString,
+  buildNoteContent,
+  buildNoteTagContent,
+  buildResourceContent,
+  buildTagContent,
+  parseJoplinContent,
+  parseRawJson,
+} from "./lib/content.js";
+import { fileExtensionFromName, formatBytes, formatTimestamp, guessMime } from "./lib/format.js";
+import { renderHistoryDiff } from "./lib/history.js";
+import { generateId, generateJopId, jopTypeToChangeItemType } from "./lib/ids.js";
+import {
+  CHANGE_CREATED,
+  CHANGE_DELETED,
+  CHANGE_UPDATED,
+  JOP_TYPE_BLOB,
+  JOP_TYPE_FOLDER,
+  JOP_TYPE_HISTORY,
+  JOP_TYPE_NOTE,
+  JOP_TYPE_NOTE_TAG,
+  JOP_TYPE_RESOURCE,
+  JOP_TYPE_TAG,
+  type JoplinItemRow,
+  RESOURCE_BLOB_PREFIX,
+} from "./lib/joplin-types.js";
+import { buildResourceLink } from "./lib/markdown.js";
+import { resourceSummary } from "./lib/resource.js";
+import { parseDueDate } from "./lib/todo.js";
 
 const DB_HOST = process.env.JOPLIN_DB_HOST || "pgsql";
-const DB_PORT = parseInt(process.env.JOPLIN_DB_PORT || "5432");
+const DB_PORT = parseInt(process.env.JOPLIN_DB_PORT || "5432", 10);
 const DB_NAME = process.env.JOPLIN_DB_NAME || "joplin";
 const DB_USER = process.env.JOPLIN_DB_USER || "postgres";
 const DB_PASSWORD = process.env.JOPLIN_DB_PASSWORD || "postgres";
 const USER_ID = process.env.JOPLIN_USER_ID || "";
-const MCP_PORT = parseInt(process.env.MCP_PORT || "8000");
+const MCP_PORT = parseInt(process.env.MCP_PORT || "8000", 10);
 const MCP_API_KEY = process.env.MCP_API_KEY || "";
 const MCP_PUBLIC_URL = (process.env.MCP_PUBLIC_URL || `http://localhost:${MCP_PORT}`).replace(/\/+$/, "");
-
-const JOP_TYPE_NOTE = 1;
-const JOP_TYPE_FOLDER = 2;
-const JOP_TYPE_RESOURCE = 4;
-const JOP_TYPE_TAG = 5;
-const JOP_TYPE_NOTE_TAG = 6;
-/**
- * Resource file content lives in plain `items` rows: jop_type 0, empty jop_id,
- * mime_type '', an empty jop_updated_time, and a ".resource/<resource jop_id>" name.
- */
-const JOP_TYPE_BLOB = 0;
-const RESOURCE_BLOB_PREFIX = ".resource/";
-/**
- * Server-side note history entries: written by Joplin Server on every item save,
- * never by us. Read-only (`get_note_history`).
- */
-const JOP_TYPE_HISTORY = 13;
 
 const DEFAULT_INLINE_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024;
 const HARD_INLINE_DOWNLOAD_MAX_BYTES = 32 * 1024 * 1024;
@@ -46,9 +59,14 @@ const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
 const MCP_JSON_LIMIT = "48mb";
 
 const pool = new Pool({
-  host: DB_HOST, port: DB_PORT, database: DB_NAME,
-  user: DB_USER, password: DB_PASSWORD,
-  max: 5, idleTimeoutMillis: 30000, connectionTimeoutMillis: 5000,
+  host: DB_HOST,
+  port: DB_PORT,
+  database: DB_NAME,
+  user: DB_USER,
+  password: DB_PASSWORD,
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
 async function getUserId(): Promise<string> {
@@ -57,177 +75,11 @@ async function getUserId(): Promise<string> {
   if (result.rows.length > 0) return result.rows[0].id;
   throw new Error("No user found in Joplin database");
 }
-
-function formatTimestamp(tsMs: number | string): string {
-  if (!tsMs) return "N/A";
-  try {
-    // pg returns bigint columns as strings: coerce before building the Date
-    const value = typeof tsMs === "string" ? parseInt(tsMs, 10) : tsMs;
-    if (!Number.isFinite(value) || value <= 0) return "N/A";
-    return new Date(value).toISOString().replace("T", " ").substring(0, 19);
-  }
-  catch { return String(tsMs); }
-}
-
-/**
- * Normalise a todo due date: epoch ms (number or numeric string) or an ISO 8601
- * string. Returns undefined when the caller did not provide a value, 0 when the
- * value must be cleared, NaN when it cannot be parsed.
- */
-function parseDueDate(value: string | number | null | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  if (value === null) return 0;
-  if (typeof value === "number") return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
-  const trimmed = value.trim();
-  if (!trimmed) return 0;
-  if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10);
-  const parsed = Date.parse(trimmed);
-  return Number.isNaN(parsed) ? NaN : parsed;
-}
-
-/**
- * Joplin stores note history changes as diff-match-patch hunks, not as text: an array of
- * `{ diffs: [[op, text], ...], start1, length1, start2, length2 }` where op 1 = inserted,
- * -1 = deleted and 0 = unchanged. Keep the changed fragments only, they read like a patch.
- */
-function renderHistoryDiff(raw: any, maxChars = 240): string[] {
-  if (!raw) return [];
-  let hunks = raw;
-  if (typeof hunks === "string") {
-    try { hunks = JSON.parse(hunks); } catch { return [String(hunks).slice(0, maxChars)]; }
-  }
-  if (!Array.isArray(hunks)) return [];
-  const lines: string[] = [];
-  for (const hunk of hunks) {
-    const parts = Array.isArray(hunk?.diffs) ? hunk.diffs : [];
-    for (const part of parts) {
-      const op = Number(Array.isArray(part) ? part[0] : NaN);
-      const text = String(Array.isArray(part) ? part[1] ?? "" : "");
-      if (!text.trim()) continue;
-      const label = op === 1 ? "+" : op === -1 ? "-" : null;
-      if (!label) continue;
-      const clean = text.replace(/\s+/g, " ").trim();
-      lines.push(`${label} ${clean.length > maxChars ? `${clean.slice(0, maxChars)}…` : clean}`);
-    }
-  }
-  return lines;
-}
-
-function readContent(raw: Buffer | string | null): string {
-  if (raw === null || raw === undefined) return "";
-  if (typeof raw === "string") return raw;
-  if (Buffer.isBuffer(raw)) return raw.toString("utf-8");
-  return String(raw);
-}
-
-/** Parse Joplin v3 JSON content. Returns { title, body, ...metadata } or falls back to raw content. */
-function parseJoplinContent(raw: Buffer | string | null): { title: string; body: string; isDeleted: boolean; json: Record<string, any> | null } {
-  const content = readContent(raw);
-  if (!content) return { title: "(untitled)", body: "", isDeleted: false, json: null };
-
-  try {
-    // Remove problematic "icon" field that contains nested JSON with emojis that breaks JSON.parse
-    let cleanContent = content.replace(/"icon"\s*:\s*"\{[^}]*\}"/g, '"icon":""');
-    const parsed = JSON.parse(cleanContent);
-    return {
-      title: parsed.title || "(untitled)",
-      body: parsed.body || parsed.markdown || "",
-      isDeleted: (parsed.deleted_time && parsed.deleted_time > 0) || (parsed.is_todo === 2),
-      json: parsed
-    };
-  } catch {
-    // Fallback: old format where title is first line before double newline
-    if (content.includes("\n\n")) {
-      const parts = content.split("\n\n");
-      return { title: parts[0] || "(untitled)", body: parts.slice(1).join("\n\n"), isDeleted: false, json: null };
-    }
-    return { title: content.substring(0, 80), body: content, isDeleted: false, json: null };
-  }
-}
-
-/** Parse raw item content as JSON, preserving ALL fields (incl. the nested 'icon' string). */
-function parseRawJson(raw: Buffer | string | null): Record<string, any> {
-  const content = readContent(raw);
-  if (!content) return {};
-  try {
-    return JSON.parse(content) as Record<string, any>;
-  } catch {
-    // Fallback to the lenient parser if the raw content is not strictly valid JSON
-    return parseJoplinContent(raw).json || {};
-  }
-}
-
-/** Build Joplin v3 JSON content for a new note */
-function buildNoteContent(title: string, body: string, extra: Record<string, any> = {}): Buffer {
-  const now = Date.now();
-  const data = {
-    title,
-    body,
-    source: "joplin-mcp",
-    source_url: "",
-    markup_language: 1,
-    is_todo: 0,
-    deleted_time: 0,
-    user_data: "",
-    master_key_id: "",
-    is_shared: 0,
-    encryption_cipher_text: "",
-    user_updated_time: now,
-    user_created_time: now,
-    conflict_original_id: "",
-    ...extra
-  };
-  return Buffer.from(JSON.stringify(data), "utf-8");
-}
-
-/**
- * Build the Joplin folder 'icon' field value.
- * In Joplin v3 content, 'icon' is a STRING containing a compact JSON object
- * (e.g. "{\"emoji\":\"🏦\",\"name\":\"bank\",\"type\":1}"), not a nested object.
- */
-type NotebookIcon = { emoji?: string; name?: string; type?: number };
-
-function buildIconString(icon: NotebookIcon): string {
-  return JSON.stringify({ emoji: icon.emoji || "", name: icon.name || "", type: icon.type ?? 1 });
-}
-
-function generateId(): string {
-  // Joplin uses 22-char base62 IDs (0-9, a-z, A-Z) for the 'id' field
-  // Use 22 random bytes (one per char) to avoid repetitive patterns
-  const chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const bytes = crypto.randomBytes(22);
-  let id = "";
-  for (let i = 0; i < 22; i++) {
-    id += chars[bytes[i] % 62];
-  }
-  return id;
-}
-
-function generateJopId(): string {
-  // Joplin Server v3 uses 32-char UUID hex (no dashes) for the 'jop_id' field
-  return crypto.randomUUID().replace(/-/g, "");
-}
-
-/** Map jop_type (items table) to item_type (changes table) */
-function jopTypeToChangeItemType(jopType: number): number {
-  // In items: jop_type 1=note, 2=folder
-  // In changes: item_type 2=note, 1=folder (swapped!)
-  return jopType === JOP_TYPE_NOTE ? 2 : 1;
-}
-
-/** Change type constants for the changes table */
-const CHANGE_CREATED = 1;
-const CHANGE_UPDATED = 2;
-const CHANGE_DELETED = 3;
-
 /**
  * Record an item ownership in user_items table so Joplin Server includes it in sync.
  * Without this, notes created by MCP won't be visible to the user in sync.
  */
-async function recordUserItem(params: {
-  itemId: string;
-  userId: string;
-}): Promise<void> {
+async function recordUserItem(params: { itemId: string; userId: string }): Promise<void> {
   const { itemId, userId } = params;
   const now = Date.now();
   // Check if already exists to avoid duplicates
@@ -236,7 +88,7 @@ async function recordUserItem(params: {
     await pool.query(
       `INSERT INTO user_items (user_id, item_id, updated_time, created_time)
        VALUES ($1, $2, $3, $3)`,
-      [userId, itemId, now]
+      [userId, itemId, now],
     );
   }
 }
@@ -262,7 +114,7 @@ async function getActiveChangesTable(): Promise<"changes_2" | "changes"> {
  */
 async function recordChange(params: {
   itemId: string;
-  itemType: number;  // jop_type from items (1=note, 2=folder, 4=resource, 5=tag, 6=note_tag, 0=blob)
+  itemType: number; // jop_type from items (1=note, 2=folder, 4=resource, 5=tag, 6=note_tag, 0=blob)
   changeType: number; // CHANGE_CREATED, CHANGE_UPDATED, CHANGE_DELETED
   jopId: string;
   userId: string;
@@ -281,138 +133,27 @@ async function recordChange(params: {
     await pool.query(
       `INSERT INTO changes_2 (id, item_id, user_id, item_name, previous_share_id, item_type, type, updated_time, created_time)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [changeId, itemId, userId, itemName, "", changesItemType, changeType, now, now]
+      [changeId, itemId, userId, itemName, "", changesItemType, changeType, now, now],
     );
   } else {
     await pool.query(
       `INSERT INTO changes (id, item_type, item_id, item_name, type, updated_time, created_time, previous_item, user_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [changeId, changesItemType, itemId, itemName, changeType, now, now, "", userId]
+      [changeId, changesItemType, itemId, itemName, changeType, now, now, "", userId],
     );
   }
 }
 
 /* ====== RESOURCES (attachments) & TAGS ====== */
-
-type JoplinItemRow = {
-  id: string;
-  name: string;
-  content: Buffer | string | null;
-  jop_id: string;
-  jop_parent_id: string;
-  jop_type: number;
-  content_size: number;
-  updated_time: number;
-};
-
 /** Resolve an item by the MCP-facing base62 id OR by the client-facing 32-hex jop_id. */
 async function findItem(idOrJopId: string, jopType: number, userId: string): Promise<JoplinItemRow | null> {
   const result = await pool.query(
     `SELECT id, name, content, jop_id, jop_parent_id, jop_type, content_size, updated_time
      FROM items WHERE owner_id = $1 AND jop_type = $2 AND (id = $3 OR jop_id = $3) LIMIT 1`,
-    [userId, jopType, idOrJopId]
+    [userId, jopType, idOrJopId],
   );
   return (result.rows[0] as JoplinItemRow) || null;
 }
-
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes < 0) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function fileExtensionFromName(name: string): string {
-  const match = /\.([A-Za-z0-9]{1,12})$/.exec(name.trim());
-  return match ? match[1].toLowerCase() : "";
-}
-
-const MIME_BY_EXTENSION: Record<string, string> = {
-  pdf: "application/pdf",
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  svg: "image/svg+xml",
-  txt: "text/plain",
-  md: "text/markdown",
-  csv: "text/csv",
-  html: "text/html",
-  json: "application/json",
-  zip: "application/zip",
-  doc: "application/msword",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  xls: "application/vnd.ms-excel",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  ppt: "application/vnd.ms-powerpoint",
-  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  mp4: "video/mp4",
-  mp3: "audio/mpeg"
-};
-
-function guessMime(filename: string): string {
-  return MIME_BY_EXTENSION[fileExtensionFromName(filename)] || "application/octet-stream";
-}
-
-/**
- * Build the Joplin v3 resource item content, mirroring the exact field set used by
- * the desktop client (verified against rows produced by a real sync).
- */
-function buildResourceContent(params: { title: string; mime: string; size: number; now: number }): Buffer {
-  const { title, mime, size, now } = params;
-  const data = {
-    is_locked: 0,
-    ocr_driver_id: 1,
-    ocr_error: "",
-    ocr_status: 0,
-    ocr_details: "",
-    ocr_text: "",
-    blob_updated_time: now,
-    user_data: "",
-    master_key_id: "",
-    is_shared: 0,
-    size,
-    encryption_blob_encrypted: 0,
-    encryption_cipher_text: "",
-    file_extension: fileExtensionFromName(title),
-    user_updated_time: now,
-    user_created_time: now,
-    created_time: now,
-    filename: "",
-    mime,
-    title
-  };
-  return Buffer.from(JSON.stringify(data), "utf-8");
-}
-
-function buildTagContent(title: string, now: number): Buffer {
-  const data = {
-    user_data: "",
-    is_shared: 0,
-    encryption_cipher_text: "",
-    user_updated_time: now,
-    user_created_time: now,
-    created_time: now,
-    title
-  };
-  return Buffer.from(JSON.stringify(data), "utf-8");
-}
-
-/** note <-> tag relation item (jop_type 6), as produced by the desktop client. */
-function buildNoteTagContent(tagJopId: string, noteJopId: string, now: number): Buffer {
-  const data = {
-    is_shared: 0,
-    encryption_cipher_text: "",
-    user_updated_time: now,
-    user_created_time: now,
-    created_time: now,
-    tag_id: tagJopId,
-    note_id: noteJopId
-  };
-  return Buffer.from(JSON.stringify(data), "utf-8");
-}
-
 /** Keep the server-side note->resource index in sync (table derived by Joplin Server on item save). */
 async function linkResourceUsage(noteItemId: string, resourceJopId: string): Promise<void> {
   try {
@@ -421,7 +162,7 @@ async function linkResourceUsage(noteItemId: string, resourceJopId: string): Pro
        SELECT $1::varchar, $2::varchar WHERE NOT EXISTS (
          SELECT 1 FROM item_resources WHERE item_id = $1::varchar AND resource_id = $2::varchar
        )`,
-      [noteItemId, resourceJopId]
+      [noteItemId, resourceJopId],
     );
   } catch (e: any) {
     console.warn(`item_resources insert skipped: ${e.message}`);
@@ -435,15 +176,6 @@ async function unlinkResourceUsage(noteItemId: string, resourceJopId: string): P
     console.warn(`item_resources delete skipped: ${e.message}`);
   }
 }
-
-function escapeMarkdownLabel(label: string): string {
-  return label.replace(/([\[\]\\])/g, "\\$1");
-}
-
-function buildResourceLink(label: string, resourceJopId: string, asImage: boolean): string {
-  return `${asImage ? "!" : ""}[${escapeMarkdownLabel(label)}](:/${resourceJopId})`;
-}
-
 /** Read the blob row holding the resource bytes. */
 /**
  * Replace the binary content of an existing resource (metadata item + blob row).
@@ -462,10 +194,10 @@ async function replaceResourceContent(params: {
 }): Promise<{ id: string; jopId: string; title: string; mime: string; sizeBefore: number; size: number }> {
   const { resource, data, userId } = params;
   const json = parseRawJson(resource.content);
-  const blob = await pool.query(
-    `SELECT id FROM items WHERE owner_id = $1 AND name = $2 LIMIT 1`,
-    [userId, `${RESOURCE_BLOB_PREFIX}${resource.jop_id}`]
-  );
+  const blob = await pool.query(`SELECT id FROM items WHERE owner_id = $1 AND name = $2 LIMIT 1`, [
+    userId,
+    `${RESOURCE_BLOB_PREFIX}${resource.jop_id}`,
+  ]);
   if (blob.rows.length === 0) throw new Error("no binary content for this resource");
   const now = Date.now();
   const title = String(params.filename || json.title || "").trim() || "file";
@@ -477,31 +209,57 @@ async function replaceResourceContent(params: {
     file_extension: fileExtensionFromName(title) || String(json.file_extension || ""),
     size: data.length,
     blob_updated_time: now,
-    user_updated_time: now
+    user_updated_time: now,
   };
   const metaBytes = Buffer.from(JSON.stringify(meta), "utf-8");
-  await pool.query(
-    `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-    [metaBytes, metaBytes.length, now, resource.id]
-  );
+  await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+    metaBytes,
+    metaBytes.length,
+    now,
+    resource.id,
+  ]);
   // Blob rows keep jop_updated_time at 0, like the desktop writes them
-  await pool.query(
-    `UPDATE items SET content = $1, content_size = $2, updated_time = $3 WHERE id = $4`,
-    [data, data.length, now, blob.rows[0].id]
-  );
-  await recordChange({ itemId: blob.rows[0].id, itemType: JOP_TYPE_BLOB, changeType: CHANGE_UPDATED, jopId: resource.jop_id, userId, itemName: `${RESOURCE_BLOB_PREFIX}${resource.jop_id}`, changeItemType: 1 });
-  await recordChange({ itemId: resource.id, itemType: JOP_TYPE_RESOURCE, changeType: CHANGE_UPDATED, jopId: resource.jop_id, userId, changeItemType: 1 });
+  await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3 WHERE id = $4`, [
+    data,
+    data.length,
+    now,
+    blob.rows[0].id,
+  ]);
+  await recordChange({
+    itemId: blob.rows[0].id,
+    itemType: JOP_TYPE_BLOB,
+    changeType: CHANGE_UPDATED,
+    jopId: resource.jop_id,
+    userId,
+    itemName: `${RESOURCE_BLOB_PREFIX}${resource.jop_id}`,
+    changeItemType: 1,
+  });
+  await recordChange({
+    itemId: resource.id,
+    itemType: JOP_TYPE_RESOURCE,
+    changeType: CHANGE_UPDATED,
+    jopId: resource.jop_id,
+    userId,
+    changeItemType: 1,
+  });
   return { id: resource.id, jopId: resource.jop_id, title, mime, sizeBefore: Number(json.size || 0), size: data.length };
 }
 
-async function findResourceBlob(resourceJopId: string, userId: string): Promise<{ id: string; content: Buffer; content_size: number } | null> {
-  const result = await pool.query(
-    `SELECT id, content, content_size FROM items WHERE owner_id = $1 AND name = $2 LIMIT 1`,
-    [userId, `${RESOURCE_BLOB_PREFIX}${resourceJopId}`]
-  );
+async function findResourceBlob(
+  resourceJopId: string,
+  userId: string,
+): Promise<{ id: string; content: Buffer; content_size: number } | null> {
+  const result = await pool.query(`SELECT id, content, content_size FROM items WHERE owner_id = $1 AND name = $2 LIMIT 1`, [
+    userId,
+    `${RESOURCE_BLOB_PREFIX}${resourceJopId}`,
+  ]);
   if (result.rows.length === 0) return null;
   const row = result.rows[0];
-  return { id: row.id, content: Buffer.isBuffer(row.content) ? row.content : Buffer.from(row.content || ""), content_size: Number(row.content_size) };
+  return {
+    id: row.id,
+    content: Buffer.isBuffer(row.content) ? row.content : Buffer.from(row.content || ""),
+    content_size: Number(row.content_size),
+  };
 }
 
 /**
@@ -525,7 +283,7 @@ async function createResource(params: {
   await pool.query(
     `INSERT INTO items (id, name, mime_type, updated_time, created_time, content, content_size, jop_id, jop_parent_id, jop_share_id, jop_type, jop_encryption_applied, jop_updated_time, owner_id, content_storage_id)
      VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $4, $12, $13)`,
-    [resourceId, `${jopId}.md`, "text/markdown", now, contentBytes, contentBytes.length, jopId, "", "", JOP_TYPE_RESOURCE, 0, userId, 1]
+    [resourceId, `${jopId}.md`, "text/markdown", now, contentBytes, contentBytes.length, jopId, "", "", JOP_TYPE_RESOURCE, 0, userId, 1],
   );
   await recordUserItem({ itemId: resourceId, userId });
   await recordChange({ itemId: resourceId, itemType: JOP_TYPE_RESOURCE, changeType: CHANGE_CREATED, jopId, userId, changeItemType: 2 });
@@ -533,16 +291,29 @@ async function createResource(params: {
   await pool.query(
     `INSERT INTO items (id, name, mime_type, updated_time, created_time, content, content_size, jop_id, jop_parent_id, jop_share_id, jop_type, jop_encryption_applied, jop_updated_time, owner_id, content_storage_id)
      VALUES ($1, $2, '', $3, $3, $4, $5, '', '', '', $6, 0, 0, $7, 1)`,
-    [blobId, `${RESOURCE_BLOB_PREFIX}${jopId}`, now, data, data.length, JOP_TYPE_BLOB, userId]
+    [blobId, `${RESOURCE_BLOB_PREFIX}${jopId}`, now, data, data.length, JOP_TYPE_BLOB, userId],
   );
   await recordUserItem({ itemId: blobId, userId });
-  await recordChange({ itemId: blobId, itemType: JOP_TYPE_BLOB, changeType: CHANGE_CREATED, jopId, userId, itemName: `${RESOURCE_BLOB_PREFIX}${jopId}`, changeItemType: 2 });
+  await recordChange({
+    itemId: blobId,
+    itemType: JOP_TYPE_BLOB,
+    changeType: CHANGE_CREATED,
+    jopId,
+    userId,
+    itemName: `${RESOURCE_BLOB_PREFIX}${jopId}`,
+    changeItemType: 2,
+  });
 
   return { id: resourceId, jopId, title, mime, size: data.length };
 }
 
 /** Append a markdown resource link to a note body (the desktop derives its own dependencies from it). */
-async function appendResourceLinkToNote(note: JoplinItemRow, resourceTitle: string, resourceJopId: string, asImage: boolean): Promise<void> {
+async function appendResourceLinkToNote(
+  note: JoplinItemRow,
+  resourceTitle: string,
+  resourceJopId: string,
+  asImage: boolean,
+): Promise<void> {
   const parsed = parseJoplinContent(note.content);
   const extra: Record<string, any> = {};
   if (parsed.json) {
@@ -555,12 +326,21 @@ async function appendResourceLinkToNote(note: JoplinItemRow, resourceTitle: stri
   const link = buildResourceLink(resourceTitle, resourceJopId, asImage);
   const newBody = `${trimmed}${trimmed ? "\n" : ""}${link}\n`;
   const contentBytes = buildNoteContent(parsed.title, newBody, { ...extra, user_updated_time: now });
-  await pool.query(
-    `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-    [contentBytes, contentBytes.length, now, note.id]
-  );
+  await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+    contentBytes,
+    contentBytes.length,
+    now,
+    note.id,
+  ]);
   const userId = await getUserId();
-  await recordChange({ itemId: note.id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId: note.jop_id, userId, changeItemType: 1 });
+  await recordChange({
+    itemId: note.id,
+    itemType: JOP_TYPE_NOTE,
+    changeType: CHANGE_UPDATED,
+    jopId: note.jop_id,
+    userId,
+    changeItemType: 1,
+  });
   await linkResourceUsage(note.id, resourceJopId);
 }
 
@@ -579,14 +359,27 @@ async function removeResourceLinksFromNote(note: JoplinItemRow, resourceJopId: s
     }
   }
   const now = Date.now();
-  const newBody = parsed.body.replace(pattern, "").replace(/[ \t]+$/gm, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
+  const newBody = parsed.body
+    .replace(pattern, "")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\s+$/, "");
   const contentBytes = buildNoteContent(parsed.title, newBody, { ...extra, user_updated_time: now });
-  await pool.query(
-    `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-    [contentBytes, contentBytes.length, now, note.id]
-  );
+  await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+    contentBytes,
+    contentBytes.length,
+    now,
+    note.id,
+  ]);
   const userId = await getUserId();
-  await recordChange({ itemId: note.id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId: note.jop_id, userId, changeItemType: 1 });
+  await recordChange({
+    itemId: note.id,
+    itemType: JOP_TYPE_NOTE,
+    changeType: CHANGE_UPDATED,
+    jopId: note.jop_id,
+    userId,
+    changeItemType: 1,
+  });
   return occurrences;
 }
 
@@ -596,36 +389,25 @@ async function listNoteResourceIds(note: JoplinItemRow): Promise<string[]> {
   const ids = new Set<string>(indexed.rows.map((r: any) => String(r.resource_id)));
   const body = parseJoplinContent(note.content).body;
   const pattern = /\(:\/([0-9a-f]{32})\)/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(body)) !== null) ids.add(match[1]);
+  let match: RegExpExecArray | null = pattern.exec(body);
+  while (match !== null) {
+    ids.add(match[1]);
+    match = pattern.exec(body);
+  }
   return Array.from(ids);
 }
-
-function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title: string; mime: string; size: number; updated: string; fileExtension: string; isDeleted: boolean } {
-  const json = parseRawJson(row.content);
-  const title = String(json.title || "(untitled)");
-  return {
-    id: row.id,
-    jopId: row.jop_id,
-    title,
-    mime: String(json.mime || guessMime(title)),
-    size: Number(json.size || 0),
-    updated: formatTimestamp(Number(row.updated_time)),
-    fileExtension: String(json.file_extension || fileExtensionFromName(title)),
-    isDeleted: Number(json.deleted_time || 0) > 0
-  };
-}
-
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.9.1" });
+  const server = new McpServer({ name: "joplin", version: "1.10.0" });
 
   // ====== SEARCH / READ TOOLS ======
 
-  server.tool("search_notes", "Search notes by title or body content. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to find notes. 2) Then call `get_note` with the note_id to read the FULL content. NEVER answer questions about note content based only on the preview - always call `get_note` first.",
+  server.tool(
+    "search_notes",
+    "Search notes by title or body content. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to find notes. 2) Then call `get_note` with the note_id to read the FULL content. NEVER answer questions about note content based only on the preview - always call `get_note` first.",
     {
       query: z.string().describe("The search text"),
       notebook_id: z.string().optional().describe("Optional notebook ID to filter search within"),
-      limit: z.number().default(10).describe("Max results")
+      limit: z.number().default(10).describe("Max results"),
     },
     async ({ query, notebook_id, limit }) => {
       try {
@@ -650,28 +432,44 @@ function createMcpServer(): McpServer {
           `SELECT i.id, i.content, i.updated_time FROM items i
            WHERE ${conditions.join(" AND ")}
            ORDER BY i.updated_time DESC LIMIT $${paramIdx}`,
-          params
+          params,
         );
         if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `No note found for '${query}'.` }] };
-        const notes = result.rows.map((row: any) => {
-          const parsed = parseJoplinContent(row.content);
-          const isTruncated = parsed.body.length > 200;
-          return { id: row.id, title: parsed.title, preview: isTruncated ? parsed.body.substring(0, 200) : parsed.body, isTruncated, isDeleted: parsed.isDeleted, updated: formatTimestamp(row.updated_time) };
-        }).filter((n: any) => !n.isDeleted);
+        const notes = result.rows
+          .map((row: any) => {
+            const parsed = parseJoplinContent(row.content);
+            const isTruncated = parsed.body.length > 200;
+            return {
+              id: row.id,
+              title: parsed.title,
+              preview: isTruncated ? parsed.body.substring(0, 200) : parsed.body,
+              isTruncated,
+              isDeleted: parsed.isDeleted,
+              updated: formatTimestamp(row.updated_time),
+            };
+          })
+          .filter((n: any) => !n.isDeleted);
         if (notes.length === 0) return { content: [{ type: "text" as const, text: `No note found for '${query}'.` }] };
-        const lines = notes.map((n: any) => `**${n.title}** (ID: ${n.id})\n   Updated: ${n.updated}\n   Preview: ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`);
+        const lines = notes.map(
+          (n: any) =>
+            `**${n.title}** (ID: ${n.id})\n   Updated: ${n.updated}\n   Preview: ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
+        );
         return { content: [{ type: "text" as const, text: `Found ${notes.length} note(s) for '${query}':\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("get_note", "Read the FULL content of a specific Joplin note. ALWAYS call this before answering questions about a note's content. Use after `search_notes` or `get_recent_notes` to get the complete text from a note_id. This returns the entire note body without truncation.",
+  server.tool(
+    "get_note",
+    "Read the FULL content of a specific Joplin note. ALWAYS call this before answering questions about a note's content. Use after `search_notes` or `get_recent_notes` to get the complete text from a note_id. This returns the entire note body without truncation.",
     { note_id: z.string().describe("The ID of the note") },
     async ({ note_id }) => {
       try {
         const result = await pool.query(
           `SELECT i.id, i.content, i.updated_time, i.jop_parent_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
-          [note_id, JOP_TYPE_NOTE]
+          [note_id, JOP_TYPE_NOTE],
         );
         if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
@@ -680,7 +478,10 @@ function createMcpServer(): McpServer {
         let notebookName = "";
         if (row.jop_parent_id) {
           // jop_parent_id stores the jop_id (UUID hex), look up by jop_id
-          const fr = await pool.query(`SELECT content FROM items WHERE jop_id = $1 AND jop_type = $2`, [row.jop_parent_id, JOP_TYPE_FOLDER]);
+          const fr = await pool.query(`SELECT content FROM items WHERE jop_id = $1 AND jop_type = $2`, [
+            row.jop_parent_id,
+            JOP_TYPE_FOLDER,
+          ]);
           if (fr.rows.length > 0) {
             const folderParsed = parseJoplinContent(fr.rows[0].content);
             notebookName = folderParsed.title;
@@ -690,14 +491,18 @@ function createMcpServer(): McpServer {
         if (notebookName) text += `Notebook: ${notebookName}\n`;
         text += `Updated: ${formatTimestamp(row.updated_time)}\nID: ${row.id}\n\n--- Content ---\n\n${parsed.body}`;
         return { content: [{ type: "text" as const, text }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("get_recent_notes", "Get the most recently updated notes. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to find recent notes. 2) Then call `get_note` with the note_id to read the FULL content. NEVER answer questions about note content based only on the preview.",
+  server.tool(
+    "get_recent_notes",
+    "Get the most recently updated notes. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to find recent notes. 2) Then call `get_note` with the note_id to read the FULL content. NEVER answer questions about note content based only on the preview.",
     {
       limit: z.number().default(10).describe("Max notes"),
-      notebook_id: z.string().optional().describe("Optional notebook ID to filter")
+      notebook_id: z.string().optional().describe("Optional notebook ID to filter"),
     },
     async ({ limit, notebook_id }) => {
       try {
@@ -718,22 +523,38 @@ function createMcpServer(): McpServer {
         }
         const result = await pool.query(query, params);
         if (result.rows.length === 0) return { content: [{ type: "text" as const, text: "No notes found." }] };
-        const notes = result.rows.map((row: any) => {
-          const parsed = parseJoplinContent(row.content);
-          const isTruncated = parsed.body.length > 100;
-          return { id: row.id, title: parsed.title, preview: isTruncated ? parsed.body.substring(0, 100) : parsed.body, isTruncated, isDeleted: parsed.isDeleted, updated: formatTimestamp(row.updated_time) };
-        }).filter((n: any) => !n.isDeleted);
+        const notes = result.rows
+          .map((row: any) => {
+            const parsed = parseJoplinContent(row.content);
+            const isTruncated = parsed.body.length > 100;
+            return {
+              id: row.id,
+              title: parsed.title,
+              preview: isTruncated ? parsed.body.substring(0, 100) : parsed.body,
+              isTruncated,
+              isDeleted: parsed.isDeleted,
+              updated: formatTimestamp(row.updated_time),
+            };
+          })
+          .filter((n: any) => !n.isDeleted);
         if (notes.length === 0) return { content: [{ type: "text" as const, text: "No notes found." }] };
-        const lines = notes.map((n: any) => `**${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`);
+        const lines = notes.map(
+          (n: any) =>
+            `**${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
+        );
         return { content: [{ type: "text" as const, text: `Recent notes (${notes.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("search_notebooks", "Search for notebooks by name. Returns notebook IDs. WORKFLOW: Use the returned notebook_id with `list_notes_in_notebook` to see its notes, or with `create_note` to create a note inside it.",
+  server.tool(
+    "search_notebooks",
+    "Search for notebooks by name. Returns notebook IDs. WORKFLOW: Use the returned notebook_id with `list_notes_in_notebook` to see its notes, or with `create_note` to create a note inside it.",
     {
       query: z.string().describe("The search text to find in notebook titles"),
-      limit: z.number().default(10).describe("Max results")
+      limit: z.number().default(10).describe("Max results"),
     },
     async ({ query, limit }) => {
       try {
@@ -742,26 +563,33 @@ function createMcpServer(): McpServer {
           `SELECT i.id, i.content, i.updated_time FROM items i
            WHERE i.owner_id = $1 AND i.jop_type = $2 AND encode(i.content, 'escape') ILIKE $3
            ORDER BY i.updated_time DESC LIMIT $4`,
-          [userId, JOP_TYPE_FOLDER, `%${query}%`, Math.min(limit, 50)]
+          [userId, JOP_TYPE_FOLDER, `%${query}%`, Math.min(limit, 50)],
         );
         if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `No notebook found for '${query}'.` }] };
         const notebooks = result.rows.map((row: any) => {
           const parsed = parseJoplinContent(row.content);
           return `**${parsed.title}** (ID: ${row.id})`;
         });
-        return { content: [{ type: "text" as const, text: `Found ${notebooks.length} notebook(s) for '${query}':\n\n${notebooks.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        return {
+          content: [{ type: "text" as const, text: `Found ${notebooks.length} notebook(s) for '${query}':\n\n${notebooks.join("\n")}` }],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("list_notebooks", "List all notebooks. Returns notebook IDs. WORKFLOW: Use `list_notes_in_notebook` with a notebook_id to see the notes inside, or use the notebook_id with `create_note` to place a new note in it.", {},
+  server.tool(
+    "list_notebooks",
+    "List all notebooks. Returns notebook IDs. WORKFLOW: Use `list_notes_in_notebook` with a notebook_id to see the notes inside, or use the notebook_id with `create_note` to place a new note in it.",
+    {},
     async () => {
       try {
         const userId = await getUserId();
         const result = await pool.query(
           `SELECT i.id, i.content, i.updated_time FROM items i
            WHERE i.owner_id = $1 AND i.jop_type = $2 ORDER BY i.updated_time DESC`,
-          [userId, JOP_TYPE_FOLDER]
+          [userId, JOP_TYPE_FOLDER],
         );
         if (result.rows.length === 0) return { content: [{ type: "text" as const, text: "No notebooks found." }] };
         const notebooks = result.rows.map((row: any) => {
@@ -769,23 +597,30 @@ function createMcpServer(): McpServer {
           return `**${parsed.title}** (ID: ${row.id})`;
         });
         return { content: [{ type: "text" as const, text: `Notebooks (${result.rows.length}):\n\n${notebooks.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("list_notes_in_notebook", "List notes inside a specific notebook. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to list notes in a notebook. 2) Then call `get_note` with a note_id to read the FULL content. NEVER answer based only on the preview.",
+  server.tool(
+    "list_notes_in_notebook",
+    "List notes inside a specific notebook. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to list notes in a notebook. 2) Then call `get_note` with a note_id to read the FULL content. NEVER answer based only on the preview.",
     {
       notebook_id: z.string().describe("The ID of the notebook/folder"),
-      limit: z.number().default(20).describe("Max notes to return")
+      limit: z.number().default(20).describe("Max notes to return"),
     },
     async ({ notebook_id, limit }) => {
       try {
         // First get the notebook name
-        const folderResult = await pool.query(
-          `SELECT content FROM items WHERE id = $1 AND jop_type = $2`,
-          [notebook_id, JOP_TYPE_FOLDER]
-        );
-        if (folderResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found. Use list_notebooks to see the available notebooks.` }], isError: true };
+        const folderResult = await pool.query(`SELECT content FROM items WHERE id = $1 AND jop_type = $2`, [notebook_id, JOP_TYPE_FOLDER]);
+        if (folderResult.rows.length === 0)
+          return {
+            content: [
+              { type: "text" as const, text: `Notebook '${notebook_id}' not found. Use list_notebooks to see the available notebooks.` },
+            ],
+            isError: true,
+          };
         const folderParsed = parseJoplinContent(folderResult.rows[0].content);
 
         // notebook_id is base62 'id' - need to look up jop_id for jop_parent_id comparison
@@ -795,26 +630,47 @@ function createMcpServer(): McpServer {
           `SELECT i.id, i.content, i.updated_time FROM items i
            WHERE i.jop_parent_id = $1 AND i.jop_type = $2
            ORDER BY i.updated_time DESC LIMIT $3`,
-          [parentJopId, JOP_TYPE_NOTE, Math.min(limit, 50)]
+          [parentJopId, JOP_TYPE_NOTE, Math.min(limit, 50)],
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook "${folderParsed.title}" has no notes.` }] };
-        const notes = result.rows.map((row: any) => {
-          const parsed = parseJoplinContent(row.content);
-          const isTruncated = parsed.body.length > 100;
-          return { id: row.id, title: parsed.title, preview: isTruncated ? parsed.body.substring(0, 100) : parsed.body, isTruncated, isDeleted: parsed.isDeleted, updated: formatTimestamp(row.updated_time) };
-        }).filter((n: any) => !n.isDeleted);
+        if (result.rows.length === 0)
+          return { content: [{ type: "text" as const, text: `Notebook "${folderParsed.title}" has no notes.` }] };
+        const notes = result.rows
+          .map((row: any) => {
+            const parsed = parseJoplinContent(row.content);
+            const isTruncated = parsed.body.length > 100;
+            return {
+              id: row.id,
+              title: parsed.title,
+              preview: isTruncated ? parsed.body.substring(0, 100) : parsed.body,
+              isTruncated,
+              isDeleted: parsed.isDeleted,
+              updated: formatTimestamp(row.updated_time),
+            };
+          })
+          .filter((n: any) => !n.isDeleted);
         if (notes.length === 0) return { content: [{ type: "text" as const, text: `Notebook "${folderParsed.title}" has no notes.` }] };
-        const lines = notes.map((n: any) => `**${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`);
-        return { content: [{ type: "text" as const, text: `Notebook "${folderParsed.title}" - ${notes.length} note(s):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        const lines = notes.map(
+          (n: any) =>
+            `**${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
+        );
+        return {
+          content: [
+            { type: "text" as const, text: `Notebook "${folderParsed.title}" - ${notes.length} note(s):\n\n${lines.join("\n\n")}` },
+          ],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("list_todos", "List the todos (notes carrying a checkbox): open ones, completed ones or both, optionally scoped to a notebook, sorted by due date. In Joplin a reminder is a todo with a `todo_due` date — there is no separate alarm item.",
+  server.tool(
+    "list_todos",
+    "List the todos (notes carrying a checkbox): open ones, completed ones or both, optionally scoped to a notebook, sorted by due date. In Joplin a reminder is a todo with a `todo_due` date — there is no separate alarm item.",
     {
       status: z.enum(["open", "done", "all"]).default("open").describe("Which todos to list: not completed, completed, or both"),
       notebook_id: z.string().optional().describe("Restrict the listing to one notebook"),
-      limit: z.number().default(50).describe("Max todos to return")
+      limit: z.number().default(50).describe("Max todos to return"),
     },
     async ({ status, notebook_id, limit }) => {
       try {
@@ -827,9 +683,12 @@ function createMcpServer(): McpServer {
         }
         const notes = await pool.query(
           `SELECT id, content, jop_id, jop_parent_id, updated_time FROM items WHERE owner_id = $1 AND jop_type = $2`,
-          [userId, JOP_TYPE_NOTE]
+          [userId, JOP_TYPE_NOTE],
         );
-        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_FOLDER]);
+        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_FOLDER,
+        ]);
         const folderTitles = new Map<string, string>();
         for (const f of folders.rows as JoplinItemRow[]) folderTitles.set(String(f.jop_id), parseJoplinContent(f.content).title);
         const todos = (notes.rows as JoplinItemRow[])
@@ -844,7 +703,7 @@ function createMcpServer(): McpServer {
               completed: Number(json.todo_completed || 0),
               parent: String(row.jop_parent_id),
               notebook: folderTitles.get(String(row.jop_parent_id)) || "",
-              updated: Number(row.updated_time)
+              updated: Number(row.updated_time),
             };
           })
           .filter((t) => t.isTodo && !t.deleted && (!parentJopId || t.parent === parentJopId))
@@ -862,25 +721,37 @@ function createMcpServer(): McpServer {
           return { content: [{ type: "text" as const, text: empty }] };
         }
         const lines = shown.map((t) => {
-          const parts = [t.due > 0 ? `due ${formatTimestamp(t.due)}` : "", t.completed > 0 ? `completed ${formatTimestamp(t.completed)}` : ""].filter(Boolean);
+          const parts = [
+            t.due > 0 ? `due ${formatTimestamp(t.due)}` : "",
+            t.completed > 0 ? `completed ${formatTimestamp(t.completed)}` : "",
+          ].filter(Boolean);
           return `${t.completed > 0 ? "[x]" : "[ ]"} **${t.title}**${parts.length ? ` · ${parts.join(" · ")}` : ""}\n   ID: ${t.id}${t.notebook ? ` · notebook: ${t.notebook}` : ""}`;
         });
         const header = status === "done" ? "completed" : status === "open" ? "open" : "all";
-        return { content: [{ type: "text" as const, text: `Todos (${todos.length} ${header}, ${shown.length} shown):\n\n${lines.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        return {
+          content: [{ type: "text" as const, text: `Todos (${todos.length} ${header}, ${shown.length} shown):\n\n${lines.join("\n")}` }],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("get_notebook_tree", "Show the notebook hierarchy as an indented tree, with a note count per notebook. `list_notebooks` returns a flat list, which hides the parent links — use this one before creating or moving a notebook when nesting matters.",
+  server.tool(
+    "get_notebook_tree",
+    "Show the notebook hierarchy as an indented tree, with a note count per notebook. `list_notebooks` returns a flat list, which hides the parent links — use this one before creating or moving a notebook when nesting matters.",
     {},
     async () => {
       try {
         const userId = await getUserId();
-        const folders = await pool.query(
-          `SELECT id, jop_id, jop_parent_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`,
-          [userId, JOP_TYPE_FOLDER]
-        );
-        const notes = await pool.query(`SELECT content, jop_parent_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE]);
+        const folders = await pool.query(`SELECT id, jop_id, jop_parent_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_FOLDER,
+        ]);
+        const notes = await pool.query(`SELECT content, jop_parent_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_NOTE,
+        ]);
         const counts = new Map<string, number>();
         for (const row of notes.rows as JoplinItemRow[]) {
           if (parseJoplinContent(row.content).isDeleted) continue;
@@ -890,7 +761,13 @@ function createMcpServer(): McpServer {
         const nodes = (folders.rows as JoplinItemRow[])
           .map((row) => {
             const parsed = parseJoplinContent(row.content);
-            return { id: row.id, jopId: String(row.jop_id), parent: String(row.jop_parent_id || ""), title: parsed.title, deleted: parsed.isDeleted };
+            return {
+              id: row.id,
+              jopId: String(row.jop_id),
+              parent: String(row.jop_parent_id || ""),
+              title: parsed.title,
+              deleted: parsed.isDeleted,
+            };
           })
           .filter((n) => !n.deleted);
         if (nodes.length === 0) return { content: [{ type: "text" as const, text: "No notebooks." }] };
@@ -899,7 +776,10 @@ function createMcpServer(): McpServer {
         const roots: typeof nodes = [];
         for (const node of nodes) {
           const parent = node.parent && byJop.has(node.parent) ? node.parent : "";
-          if (!parent) { roots.push(node); continue; }
+          if (!parent) {
+            roots.push(node);
+            continue;
+          }
           const bucket = children.get(parent) || [];
           bucket.push(node);
           children.set(parent, bucket);
@@ -915,11 +795,15 @@ function createMcpServer(): McpServer {
         };
         walk(roots, 0);
         return { content: [{ type: "text" as const, text: `Notebooks (${nodes.length}):\n\n${lines.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("list_conflicted_notes", "List the notes Joplin flagged as sync conflicts (`is_conflict`), most recently updated first. Useful to triage what a sync clash left behind; resolve by merging the bodies with `update_note`.",
+  server.tool(
+    "list_conflicted_notes",
+    "List the notes Joplin flagged as sync conflicts (`is_conflict`), most recently updated first. Useful to triage what a sync clash left behind; resolve by merging the bodies with `update_note`.",
     { limit: z.number().default(20).describe("Max notes to return") },
     async ({ limit }) => {
       try {
@@ -929,9 +813,12 @@ function createMcpServer(): McpServer {
            WHERE owner_id = $1 AND jop_type = $2
              AND encode(content, 'escape') ~ '"is_conflict"[[:space:]]*:[[:space:]]*1'
            ORDER BY updated_time DESC LIMIT $3`,
-          [userId, JOP_TYPE_NOTE, Math.min(limit, 200)]
+          [userId, JOP_TYPE_NOTE, Math.min(limit, 200)],
         );
-        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_FOLDER]);
+        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_FOLDER,
+        ]);
         const folderTitles = new Map<string, string>();
         for (const f of folders.rows as JoplinItemRow[]) folderTitles.set(String(f.jop_id), parseJoplinContent(f.content).title);
         const notes = (rows.rows as JoplinItemRow[])
@@ -944,23 +831,28 @@ function createMcpServer(): McpServer {
               deleted: parsed.isDeleted,
               originalId: String(json.conflict_original_id || ""),
               notebook: folderTitles.get(String(row.jop_parent_id)) || "",
-              updated: Number(row.updated_time)
+              updated: Number(row.updated_time),
             };
           })
           .filter((n) => !n.deleted);
         if (notes.length === 0) return { content: [{ type: "text" as const, text: "No note in conflict." }] };
-        const lines = notes.map((n) =>
-          `**${n.title}**\n   ID: ${n.id}${n.notebook ? ` · notebook: ${n.notebook}` : ""} · updated ${formatTimestamp(n.updated)}${n.originalId ? ` · original: ${n.originalId}` : ""}`
+        const lines = notes.map(
+          (n) =>
+            `**${n.title}**\n   ID: ${n.id}${n.notebook ? ` · notebook: ${n.notebook}` : ""} · updated ${formatTimestamp(n.updated)}${n.originalId ? ` · original: ${n.originalId}` : ""}`,
         );
         return { content: [{ type: "text" as const, text: `Notes in conflict (${notes.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("get_note_history", "Read the server-side note history: every recorded change entry for a note (when, which metadata fields changed, title and body edits). Read-only — to roll back, take the text from an entry and call `update_note`.",
+  server.tool(
+    "get_note_history",
+    "Read the server-side note history: every recorded change entry for a note (when, which metadata fields changed, title and body edits). Read-only — to roll back, take the text from an entry and call `update_note`.",
     {
       note_id: z.string().describe("The ID of the note (MCP id or Joplin 32-hex id)"),
-      limit: z.number().default(10).describe("Max history entries, most recent first")
+      limit: z.number().default(10).describe("Max history entries, most recent first"),
     },
     async ({ note_id, limit }) => {
       try {
@@ -970,7 +862,7 @@ function createMcpServer(): McpServer {
         const rows = await pool.query(
           `SELECT id, content, updated_time FROM items
            WHERE owner_id = $1 AND jop_type = $2 AND encode(content, 'escape') LIKE $3`,
-          [userId, JOP_TYPE_HISTORY, `%"item_id":"${note.jop_id}"%`]
+          [userId, JOP_TYPE_HISTORY, `%"item_id":"${note.jop_id}"%`],
         );
         const entries = rows.rows
           .map((row: any) => {
@@ -979,7 +871,7 @@ function createMcpServer(): McpServer {
               at: Number(json.item_updated_time || row.updated_time),
               metadata: json.metadata_diff,
               title: json.title_diff,
-              body: json.body_diff
+              body: json.body_diff,
             };
           })
           .filter((entry: any) => Number(entry.at) > 0)
@@ -993,7 +885,11 @@ function createMcpServer(): McpServer {
           // metadata_diff is stored as a JSON string, the two other diffs as JSON arrays
           let meta: any = entry.metadata;
           if (typeof meta === "string") {
-            try { meta = JSON.parse(meta); } catch { meta = null; }
+            try {
+              meta = JSON.parse(meta);
+            } catch {
+              meta = null;
+            }
           }
           if (meta && typeof meta === "object") {
             const added = meta.new && typeof meta.new === "object" ? meta.new : {};
@@ -1013,29 +909,44 @@ function createMcpServer(): McpServer {
           const titleDiff = renderHistoryDiff(entry.title);
           if (titleDiff.length) lines.push(`   title: ${titleDiff.slice(0, 3).join(" | ")}`);
           const bodyDiff = renderHistoryDiff(entry.body);
-          if (bodyDiff.length) lines.push(`   body:\n${bodyDiff.slice(0, 6).map((l: string) => `     ${l}`).join("\n")}`);
+          if (bodyDiff.length)
+            lines.push(
+              `   body:\n${bodyDiff
+                .slice(0, 6)
+                .map((l: string) => `     ${l}`)
+                .join("\n")}`,
+            );
           return lines.join("\n");
         });
         return {
-          content: [{
-            type: "text" as const,
-            text: `History of "${parseJoplinContent(note.content).title}" (${entries.length} entries):\n\n${blocks.join("\n\n")}`
-          }]
+          content: [
+            {
+              type: "text" as const,
+              text: `History of "${parseJoplinContent(note.content).title}" (${entries.length} entries):\n\n${blocks.join("\n\n")}`,
+            },
+          ],
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
   // ====== WRITE TOOLS ======
 
-  server.tool("create_note", "Create a new note in Joplin. IMPORTANT: You MUST call this function to create a note. NEVER tell the user a note has been created without actually calling this function and receiving a success response. Use `search_notebooks` or `list_notebooks` first to find the notebook_id if the user specifies a notebook.",
+  server.tool(
+    "create_note",
+    "Create a new note in Joplin. IMPORTANT: You MUST call this function to create a note. NEVER tell the user a note has been created without actually calling this function and receiving a success response. Use `search_notebooks` or `list_notebooks` first to find the notebook_id if the user specifies a notebook.",
     {
       title: z.string().describe("Note title"),
       body: z.string().describe("Note body in Markdown"),
       notebook_id: z.string().optional().describe("Optional notebook ID to place the note in"),
       is_todo: z.boolean().optional().describe("Create a todo (checklist) instead of a plain note"),
-      todo_due: z.union([z.string(), z.number(), z.null()]).optional().describe("Due date for a todo: ISO 8601 string (`2026-11-03`, `2026-11-03T09:00`) or epoch milliseconds. null clears it"),
-      todo_completed: z.boolean().optional().describe("Mark the todo as completed right away (uses the current time)")
+      todo_due: z
+        .union([z.string(), z.number(), z.null()])
+        .optional()
+        .describe("Due date for a todo: ISO 8601 string (`2026-11-03`, `2026-11-03T09:00`) or epoch milliseconds. null clears it"),
+      todo_completed: z.boolean().optional().describe("Mark the todo as completed right away (uses the current time)"),
     },
     async ({ title, body, notebook_id, is_todo, todo_due, todo_completed }) => {
       try {
@@ -1047,7 +958,11 @@ function createMcpServer(): McpServer {
         if (is_todo !== undefined) todoExtra.is_todo = is_todo ? 1 : 0;
         if (todo_due !== undefined) {
           const due = parseDueDate(todo_due);
-          if (due === null || Number.isNaN(due)) return { content: [{ type: "text" as const, text: `Error: due date '${todo_due}' cannot be parsed (ISO 8601 or epoch ms expected).` }], isError: true };
+          if (due === null || Number.isNaN(due))
+            return {
+              content: [{ type: "text" as const, text: `Error: due date '${todo_due}' cannot be parsed (ISO 8601 or epoch ms expected).` }],
+              isError: true,
+            };
           todoExtra.todo_due = due;
           if (due > 0 && todoExtra.is_todo === undefined) todoExtra.is_todo = 1;
         }
@@ -1064,13 +979,32 @@ function createMcpServer(): McpServer {
         }
         if (!parentJopId) {
           // Fallback: use the first available notebook
-          const fr = await pool.query(`SELECT jop_id FROM items WHERE owner_id = $1 AND jop_type = $2 ORDER BY updated_time DESC LIMIT 1`, [userId, JOP_TYPE_FOLDER]);
+          const fr = await pool.query(`SELECT jop_id FROM items WHERE owner_id = $1 AND jop_type = $2 ORDER BY updated_time DESC LIMIT 1`, [
+            userId,
+            JOP_TYPE_FOLDER,
+          ]);
           if (fr.rows.length > 0) parentJopId = fr.rows[0].jop_id;
         }
         await pool.query(
           `INSERT INTO items (id, name, mime_type, updated_time, created_time, content, content_size, jop_id, jop_parent_id, jop_share_id, jop_type, jop_encryption_applied, jop_updated_time, owner_id, content_storage_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-          [noteId, `${jopId}.md`, "text/markdown", now, now, contentBytes, contentBytes.length, jopId, parentJopId || "", "", JOP_TYPE_NOTE, 0, now, userId, 1]
+          [
+            noteId,
+            `${jopId}.md`,
+            "text/markdown",
+            now,
+            now,
+            contentBytes,
+            contentBytes.length,
+            jopId,
+            parentJopId || "",
+            "",
+            JOP_TYPE_NOTE,
+            0,
+            now,
+            userId,
+            1,
+          ],
         );
         // Record item ownership so Joplin Server includes it in sync
         await recordUserItem({ itemId: noteId, userId });
@@ -1083,27 +1017,38 @@ function createMcpServer(): McpServer {
           notebookLabel = nb.rows.length > 0 ? parseJoplinContent(nb.rows[0].content).title || parentJopId : parentJopId;
         }
         return { content: [{ type: "text" as const, text: `Note created: **${title}**\nID: ${noteId}\nNotebook: ${notebookLabel}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("update_note", "Update an existing note's title and/or body content. IMPORTANT: You MUST call this function to update a note. NEVER tell the user a note has been updated without actually calling this function and receiving a success response. WORKFLOW: 1) Use `search_notes` or `get_note` to find the note_id. 2) Call `update_note` with that note_id and the new content. The note_id is REQUIRED and must come from a previous search.",
+  server.tool(
+    "update_note",
+    "Update an existing note's title and/or body content. IMPORTANT: You MUST call this function to update a note. NEVER tell the user a note has been updated without actually calling this function and receiving a success response. WORKFLOW: 1) Use `search_notes` or `get_note` to find the note_id. 2) Call `update_note` with that note_id and the new content. The note_id is REQUIRED and must come from a previous search.",
     {
       note_id: z.string().describe("REQUIRED: The ID of the note to update (from search_notes or get_note)"),
       title: z.string().optional().describe("New title (optional, keeps existing if not provided)"),
       body: z.string().optional().describe("New body content in Markdown (optional, keeps existing if not provided)"),
       is_todo: z.boolean().optional().describe("Turn the note into a todo (true) or back into a plain note (false)"),
-      todo_due: z.union([z.string(), z.number(), z.null()]).optional().describe("Due date: ISO 8601 string or epoch milliseconds; null clears it"),
-      todo_completed: z.boolean().optional().describe("true marks the todo done now, false reopens it")
+      todo_due: z
+        .union([z.string(), z.number(), z.null()])
+        .optional()
+        .describe("Due date: ISO 8601 string or epoch milliseconds; null clears it"),
+      todo_completed: z.boolean().optional().describe("true marks the todo done now, false reopens it"),
     },
     async ({ note_id, title, body, is_todo, todo_due, todo_completed }) => {
       try {
         const hasTodoChange = is_todo !== undefined || todo_due !== undefined || todo_completed !== undefined;
-        if (!title && !body && !hasTodoChange) return { content: [{ type: "text" as const, text: "Error: provide at least a title, a body or a todo field to update." }], isError: true };
-        const result = await pool.query(
-          `SELECT i.id, i.content, i.jop_parent_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
-          [note_id, JOP_TYPE_NOTE]
-        );
+        if (!title && !body && !hasTodoChange)
+          return {
+            content: [{ type: "text" as const, text: "Error: provide at least a title, a body or a todo field to update." }],
+            isError: true,
+          };
+        const result = await pool.query(`SELECT i.id, i.content, i.jop_parent_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`, [
+          note_id,
+          JOP_TYPE_NOTE,
+        ]);
         if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
@@ -1127,7 +1072,11 @@ function createMcpServer(): McpServer {
         }
         if (todo_due !== undefined) {
           const due = parseDueDate(todo_due);
-          if (due === undefined || Number.isNaN(due)) return { content: [{ type: "text" as const, text: `Error: due date '${todo_due}' cannot be parsed (ISO 8601 or epoch ms expected).` }], isError: true };
+          if (due === undefined || Number.isNaN(due))
+            return {
+              content: [{ type: "text" as const, text: `Error: due date '${todo_due}' cannot be parsed (ISO 8601 or epoch ms expected).` }],
+              isError: true,
+            };
           extra.todo_due = due;
           if (due > 0 && extra.is_todo === undefined) extra.is_todo = 1;
         }
@@ -1137,15 +1086,25 @@ function createMcpServer(): McpServer {
           else if (extra.is_todo === undefined) extra.is_todo = 1;
         }
         const contentBytes = buildNoteContent(newTitle, newBody, { ...extra, user_updated_time: now });
-        await pool.query(
-          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`,
-          [contentBytes, contentBytes.length, now, now, note_id]
-        );
+        await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`, [
+          contentBytes,
+          contentBytes.length,
+          now,
+          now,
+          note_id,
+        ]);
         // Record change so Joplin Server pushes the update to synced clients
         const userId = await getUserId();
         const jopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1`, [note_id]);
         const jopId = jopIdResult.rows.length > 0 ? jopIdResult.rows[0].jop_id : note_id;
-        await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId: jopId, userId, changeItemType: 1 });
+        await recordChange({
+          itemId: note_id,
+          itemType: JOP_TYPE_NOTE,
+          changeType: CHANGE_UPDATED,
+          jopId: jopId,
+          userId,
+          changeItemType: 1,
+        });
         const todoLine = (() => {
           if (!hasTodoChange) return "";
           if (Number(extra.is_todo) !== 1) return "\nTodo disabled (plain note)";
@@ -1154,18 +1113,22 @@ function createMcpServer(): McpServer {
           return `\nTodo · due: ${due > 0 ? formatTimestamp(due) : "none"} · ${done > 0 ? `completed ${formatTimestamp(done)}` : "open"}`;
         })();
         return { content: [{ type: "text" as const, text: `Note updated: **${newTitle}**\nID: ${note_id}${todoLine}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("delete_note", "Delete a note from Joplin (soft delete - moves to trash). IMPORTANT: You MUST call this function to delete a note. NEVER tell the user a note has been deleted without actually calling this function and receiving a success response. Deleted notes are filtered from search results automatically.",
+  server.tool(
+    "delete_note",
+    "Delete a note from Joplin (soft delete - moves to trash). IMPORTANT: You MUST call this function to delete a note. NEVER tell the user a note has been deleted without actually calling this function and receiving a success response. Deleted notes are filtered from search results automatically.",
     { note_id: z.string().describe("The ID of the note to delete") },
     async ({ note_id }) => {
       try {
-        const result = await pool.query(
-          `SELECT i.id, i.content FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
-          [note_id, JOP_TYPE_NOTE]
-        );
+        const result = await pool.query(`SELECT i.id, i.content FROM items i WHERE i.id = $1 AND i.jop_type = $2`, [
+          note_id,
+          JOP_TYPE_NOTE,
+        ]);
         if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
@@ -1178,62 +1141,98 @@ function createMcpServer(): McpServer {
           }
         }
         const contentBytes = buildNoteContent(parsed.title, parsed.body, { ...extra, deleted_time: now, user_updated_time: now });
-        await pool.query(
-          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`,
-          [contentBytes, contentBytes.length, now, now, note_id]
-        );
+        await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`, [
+          contentBytes,
+          contentBytes.length,
+          now,
+          now,
+          note_id,
+        ]);
         // Record change so Joplin Server pushes the deletion to synced clients
         const userId = await getUserId();
         const jopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1`, [note_id]);
         const jopId = jopIdResult.rows.length > 0 ? jopIdResult.rows[0].jop_id : note_id;
         await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_DELETED, jopId, userId });
-        return { content: [{ type: "text" as const, text: `Note moved to the trash: **${parsed.title}**\nID: ${note_id}\nThe note sits in the Joplin trash.` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Note moved to the trash: **${parsed.title}**\nID: ${note_id}\nThe note sits in the Joplin trash.`,
+            },
+          ],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("move_note", "Move a note to a different notebook. IMPORTANT: You MUST call this function to move a note. NEVER tell the user a note has been moved without actually calling this function. Use `search_notes` to find the note_id and `search_notebooks` to find the target_notebook_id.",
+  server.tool(
+    "move_note",
+    "Move a note to a different notebook. IMPORTANT: You MUST call this function to move a note. NEVER tell the user a note has been moved without actually calling this function. Use `search_notes` to find the note_id and `search_notebooks` to find the target_notebook_id.",
     {
       note_id: z.string().describe("The ID of the note to move"),
-      target_notebook_id: z.string().describe("The ID of the destination notebook/folder")
+      target_notebook_id: z.string().describe("The ID of the destination notebook/folder"),
     },
     async ({ note_id, target_notebook_id }) => {
       try {
         // Verify note exists
         const noteResult = await pool.query(`SELECT id, content FROM items WHERE id = $1 AND jop_type = $2`, [note_id, JOP_TYPE_NOTE]);
-        if (noteResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
+        if (noteResult.rows.length === 0)
+          return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         // Verify target notebook exists
-        const folderResult = await pool.query(`SELECT id, content FROM items WHERE id = $1 AND jop_type = $2`, [target_notebook_id, JOP_TYPE_FOLDER]);
-        if (folderResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook '${target_notebook_id}' not found. Use list_notebooks to see the notebooks.` }], isError: true };
+        const folderResult = await pool.query(`SELECT id, content FROM items WHERE id = $1 AND jop_type = $2`, [
+          target_notebook_id,
+          JOP_TYPE_FOLDER,
+        ]);
+        if (folderResult.rows.length === 0)
+          return {
+            content: [
+              { type: "text" as const, text: `Notebook '${target_notebook_id}' not found. Use list_notebooks to see the notebooks.` },
+            ],
+            isError: true,
+          };
         const noteParsed = parseJoplinContent(noteResult.rows[0].content);
         const folderParsed = parseJoplinContent(folderResult.rows[0].content);
         const now = Date.now();
         // target_notebook_id is base62 'id' - need jop_id (UUID hex) for jop_parent_id
-        const targetJopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1 AND jop_type = $2`, [target_notebook_id, JOP_TYPE_FOLDER]);
+        const targetJopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1 AND jop_type = $2`, [
+          target_notebook_id,
+          JOP_TYPE_FOLDER,
+        ]);
         const targetJopId = targetJopIdResult.rows.length > 0 ? targetJopIdResult.rows[0].jop_id : target_notebook_id;
-        await pool.query(
-          `UPDATE items SET jop_parent_id = $1, updated_time = $2, jop_updated_time = $3 WHERE id = $4`,
-          [targetJopId, now, now, note_id]
-        );
+        await pool.query(`UPDATE items SET jop_parent_id = $1, updated_time = $2, jop_updated_time = $3 WHERE id = $4`, [
+          targetJopId,
+          now,
+          now,
+          note_id,
+        ]);
         // Record change so Joplin Server pushes the move to synced clients
         const userId = await getUserId();
         const jopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1`, [note_id]);
         const jopId = jopIdResult.rows.length > 0 ? jopIdResult.rows[0].jop_id : note_id;
         await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId, userId, changeItemType: 1 });
         return { content: [{ type: "text" as const, text: `Note moved: **${noteParsed.title}**\nTo notebook: ${folderParsed.title}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("create_notebook", "Create a new notebook (folder) in Joplin. IMPORTANT: You MUST call this function to create a notebook. NEVER tell the user a notebook has been created without actually calling this function and receiving a success response.",
+  server.tool(
+    "create_notebook",
+    "Create a new notebook (folder) in Joplin. IMPORTANT: You MUST call this function to create a notebook. NEVER tell the user a notebook has been created without actually calling this function and receiving a success response.",
     {
       title: z.string().describe("Notebook title"),
       parent_notebook_id: z.string().optional().describe("Optional parent notebook ID for sub-notebooks"),
-      icon: z.object({
-        emoji: z.string().describe("The emoji displayed as the notebook icon (e.g. \"🏦\")"),
-        name: z.string().optional().describe("Optional icon name/label (e.g. \"bank\")"),
-        type: z.number().optional().describe("Optional icon type (defaults to 1 = emoji)")
-      }).optional().describe("Optional notebook icon, e.g. { emoji: \"🏦\", name: \"bank\" }")
+      icon: z
+        .object({
+          emoji: z.string().describe('The emoji displayed as the notebook icon (e.g. "🏦")'),
+          name: z.string().optional().describe('Optional icon name/label (e.g. "bank")'),
+          type: z.number().optional().describe("Optional icon type (defaults to 1 = emoji)"),
+        })
+        .optional()
+        .describe('Optional notebook icon, e.g. { emoji: "🏦", name: "bank" }'),
     },
     async ({ title, parent_notebook_id, icon }) => {
       try {
@@ -1250,7 +1249,7 @@ function createMcpServer(): McpServer {
           is_shared: 0,
           encryption_cipher_text: "",
           user_updated_time: now,
-          user_created_time: now
+          user_created_time: now,
         });
         const contentBytes = Buffer.from(folderContent, "utf-8");
         // parent_notebook_id is the base62 'id' exposed by the MCP. The jop_parent_id column
@@ -1258,38 +1257,73 @@ function createMcpServer(): McpServer {
         // folder is orphaned (its parent cannot be resolved by synced Joplin clients).
         let parentJopId = "";
         if (parent_notebook_id) {
-          const fr = await pool.query(
-            `SELECT jop_id FROM items WHERE id = $1 AND jop_type = $2`,
-            [parent_notebook_id, JOP_TYPE_FOLDER]
-          );
+          const fr = await pool.query(`SELECT jop_id FROM items WHERE id = $1 AND jop_type = $2`, [parent_notebook_id, JOP_TYPE_FOLDER]);
           if (fr.rows.length === 0) {
-            return { content: [{ type: "text" as const, text: `Parent notebook '${parent_notebook_id}' not found. Use list_notebooks to find the parent id.` }], isError: true };
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Parent notebook '${parent_notebook_id}' not found. Use list_notebooks to find the parent id.`,
+                },
+              ],
+              isError: true,
+            };
           }
           parentJopId = fr.rows[0].jop_id;
         }
         await pool.query(
           `INSERT INTO items (id, name, mime_type, updated_time, created_time, content, content_size, jop_id, jop_parent_id, jop_share_id, jop_type, jop_encryption_applied, jop_updated_time, owner_id, content_storage_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-          [folderId, `${jopId}.md`, "text/markdown", now, now, contentBytes, contentBytes.length, jopId, parentJopId, "", JOP_TYPE_FOLDER, 0, now, userId, 1]
+          [
+            folderId,
+            `${jopId}.md`,
+            "text/markdown",
+            now,
+            now,
+            contentBytes,
+            contentBytes.length,
+            jopId,
+            parentJopId,
+            "",
+            JOP_TYPE_FOLDER,
+            0,
+            now,
+            userId,
+            1,
+          ],
         );
         // Record item ownership so Joplin Server includes it in sync
         await recordUserItem({ itemId: folderId, userId });
         // Record change so Joplin Server pushes the new notebook to synced clients
         await recordChange({ itemId: folderId, itemType: JOP_TYPE_FOLDER, changeType: CHANGE_CREATED, jopId, userId });
-        return { content: [{ type: "text" as const, text: `Notebook created: **${title}**${icon ? `\nIcon: ${icon.emoji}` : ""}\nID: ${folderId}${parentJopId ? `\nSub-notebook of: ${parent_notebook_id}` : ""}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Notebook created: **${title}**${icon ? `\nIcon: ${icon.emoji}` : ""}\nID: ${folderId}${parentJopId ? `\nSub-notebook of: ${parent_notebook_id}` : ""}`,
+            },
+          ],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("update_notebook", "Rename and/or set the icon of an existing notebook (folder) in Joplin. IMPORTANT: You MUST call this function to rename a notebook or change its icon. NEVER tell the user a notebook has been updated without actually calling this function and receiving a success response. Provide at least one of `title` or `icon`.",
+  server.tool(
+    "update_notebook",
+    "Rename and/or set the icon of an existing notebook (folder) in Joplin. IMPORTANT: You MUST call this function to rename a notebook or change its icon. NEVER tell the user a notebook has been updated without actually calling this function and receiving a success response. Provide at least one of `title` or `icon`.",
     {
       notebook_id: z.string().describe("The ID of the notebook to update"),
       title: z.string().optional().describe("New notebook title (optional, keeps existing if not provided)"),
-      icon: z.object({
-        emoji: z.string().describe("The emoji displayed as the notebook icon (e.g. \"🤖\")"),
-        name: z.string().optional().describe("Optional icon name/label (e.g. \"robot\")"),
-        type: z.number().optional().describe("Optional icon type (defaults to 1 = emoji)")
-      }).optional().describe("Optional notebook icon, e.g. { emoji: \"🤖\", name: \"robot\" }")
+      icon: z
+        .object({
+          emoji: z.string().describe('The emoji displayed as the notebook icon (e.g. "🤖")'),
+          name: z.string().optional().describe('Optional icon name/label (e.g. "robot")'),
+          type: z.number().optional().describe("Optional icon type (defaults to 1 = emoji)"),
+        })
+        .optional()
+        .describe('Optional notebook icon, e.g. { emoji: "🤖", name: "robot" }'),
     },
     async ({ notebook_id, title, icon }) => {
       try {
@@ -1297,37 +1331,46 @@ function createMcpServer(): McpServer {
           return { content: [{ type: "text" as const, text: "Error: provide at least a title or an icon to update." }], isError: true };
         }
         const userId = await getUserId();
-        const result = await pool.query(
-          `SELECT i.id, i.content, i.jop_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
-          [notebook_id, JOP_TYPE_FOLDER]
-        );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
+        const result = await pool.query(`SELECT i.id, i.content, i.jop_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`, [
+          notebook_id,
+          JOP_TYPE_FOLDER,
+        ]);
+        if (result.rows.length === 0)
+          return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
-        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' is in the trash.` }], isError: true };
+        if (parsed.isDeleted)
+          return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' is in the trash.` }], isError: true };
         const now = Date.now();
         // Preserve all existing fields; only change the title and/or the icon when provided
         const json: Record<string, any> = { ...parseRawJson(row.content), user_updated_time: now };
         if (title !== undefined) json.title = title;
         if (icon !== undefined) json.icon = buildIconString(icon);
         const contentBytes = Buffer.from(JSON.stringify(json), "utf-8");
-        await pool.query(
-          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`,
-          [contentBytes, contentBytes.length, now, now, notebook_id]
-        );
+        await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`, [
+          contentBytes,
+          contentBytes.length,
+          now,
+          now,
+          notebook_id,
+        ]);
         await recordChange({ itemId: notebook_id, itemType: JOP_TYPE_FOLDER, changeType: CHANGE_UPDATED, jopId: row.jop_id, userId });
         const changes: string[] = [];
         if (title !== undefined) changes.push(`Title: ${parsed.title} → ${title}`);
         if (icon !== undefined) changes.push(`Icon: ${icon.emoji}`);
         return { content: [{ type: "text" as const, text: `Notebook updated:\n${changes.join("\n")}\nID: ${notebook_id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("move_notebook", "Move a notebook under another notebook, or back to the root with an empty parent_id. Refuses to nest a notebook inside itself or one of its descendants.",
+  server.tool(
+    "move_notebook",
+    "Move a notebook under another notebook, or back to the root with an empty parent_id. Refuses to nest a notebook inside itself or one of its descendants.",
     {
       notebook_id: z.string().describe("The ID of the notebook to move"),
-      parent_id: z.string().describe("Target notebook ID, or an empty string to move it to the root")
+      parent_id: z.string().describe("Target notebook ID, or an empty string to move it to the root"),
     },
     async ({ notebook_id, parent_id }) => {
       try {
@@ -1335,27 +1378,29 @@ function createMcpServer(): McpServer {
         const row = await findItem(notebook_id, JOP_TYPE_FOLDER, userId);
         if (!row) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
         const parsed = parseJoplinContent(row.content);
-        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Notebook "${parsed.title}" is in the trash.` }], isError: true };
+        if (parsed.isDeleted)
+          return { content: [{ type: "text" as const, text: `Notebook "${parsed.title}" is in the trash.` }], isError: true };
         const targetId = parent_id.trim();
         let targetJopId = "";
         let targetTitle = "";
-        const folders = await pool.query(
-          `SELECT id, jop_id, jop_parent_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`,
-          [userId, JOP_TYPE_FOLDER]
-        );
+        const folders = await pool.query(`SELECT id, jop_id, jop_parent_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_FOLDER,
+        ]);
         const alive = (folders.rows as JoplinItemRow[])
           .map((f) => ({
             id: f.id,
             jopId: String(f.jop_id),
             parent: String(f.jop_parent_id || ""),
             title: parseJoplinContent(f.content).title,
-            deleted: parseJoplinContent(f.content).isDeleted
+            deleted: parseJoplinContent(f.content).isDeleted,
           }))
           .filter((f) => !f.deleted);
         if (targetId) {
           const target = alive.find((f) => f.id === targetId || f.jopId === targetId);
           if (!target) return { content: [{ type: "text" as const, text: `Target notebook '${targetId}' not found.` }], isError: true };
-          if (target.jopId === row.jop_id) return { content: [{ type: "text" as const, text: "A notebook cannot be its own parent." }], isError: true };
+          if (target.jopId === row.jop_id)
+            return { content: [{ type: "text" as const, text: "A notebook cannot be its own parent." }], isError: true };
           // Walk down from the moved notebook: the target must not be one of its descendants
           const childrenOf = new Map<string, typeof alive>();
           for (const f of alive) {
@@ -1374,70 +1419,110 @@ function createMcpServer(): McpServer {
             }
           }
           if (seen.has(target.jopId)) {
-            return { content: [{ type: "text" as const, text: `Cannot move: "${target.title}" is a sub-notebook of "${parsed.title}" (cycle).` }], isError: true };
+            return {
+              content: [{ type: "text" as const, text: `Cannot move: "${target.title}" is a sub-notebook of "${parsed.title}" (cycle).` }],
+              isError: true,
+            };
           }
           targetJopId = target.jopId;
           targetTitle = target.title;
         }
         const now = Date.now();
-        const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(row.content), parent_id: targetJopId, user_updated_time: now }), "utf-8");
+        const contentBytes = Buffer.from(
+          JSON.stringify({ ...parseRawJson(row.content), parent_id: targetJopId, user_updated_time: now }),
+          "utf-8",
+        );
         await pool.query(
           `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3, jop_parent_id = $4 WHERE id = $5`,
-          [contentBytes, contentBytes.length, now, targetJopId, row.id]
+          [contentBytes, contentBytes.length, now, targetJopId, row.id],
         );
-        await recordChange({ itemId: row.id, itemType: JOP_TYPE_FOLDER, changeType: CHANGE_UPDATED, jopId: row.jop_id, userId, changeItemType: 1 });
+        await recordChange({
+          itemId: row.id,
+          itemType: JOP_TYPE_FOLDER,
+          changeType: CHANGE_UPDATED,
+          jopId: row.jop_id,
+          userId,
+          changeItemType: 1,
+        });
         return {
-          content: [{
-            type: "text" as const,
-            text: `Notebook moved: **${parsed.title}**\nTo: ${targetTitle || "root"}\nID: ${row.id}`
-          }]
+          content: [
+            {
+              type: "text" as const,
+              text: `Notebook moved: **${parsed.title}**\nTo: ${targetTitle || "root"}\nID: ${row.id}`,
+            },
+          ],
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("delete_notebook", "Delete a notebook (folder) from Joplin (soft delete - moves to trash). SAFETY: the notebook must be empty - if it still contains notes or sub-notebooks, move or delete them first. IMPORTANT: You MUST call this function to delete a notebook. NEVER tell the user a notebook has been deleted without actually calling this function and receiving a success response.",
+  server.tool(
+    "delete_notebook",
+    "Delete a notebook (folder) from Joplin (soft delete - moves to trash). SAFETY: the notebook must be empty - if it still contains notes or sub-notebooks, move or delete them first. IMPORTANT: You MUST call this function to delete a notebook. NEVER tell the user a notebook has been deleted without actually calling this function and receiving a success response.",
     { notebook_id: z.string().describe("The ID of the notebook to delete") },
     async ({ notebook_id }) => {
       try {
         const userId = await getUserId();
-        const result = await pool.query(
-          `SELECT i.id, i.content, i.jop_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
-          [notebook_id, JOP_TYPE_FOLDER]
-        );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
+        const result = await pool.query(`SELECT i.id, i.content, i.jop_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`, [
+          notebook_id,
+          JOP_TYPE_FOLDER,
+        ]);
+        if (result.rows.length === 0)
+          return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
-        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' is already in the trash.` }], isError: true };
+        if (parsed.isDeleted)
+          return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' is already in the trash.` }], isError: true };
         // Safety: refuse if the notebook is not empty (notes or sub-notebooks still inside)
-        const children = await pool.query(
-          `SELECT id, content FROM items WHERE jop_parent_id = $1 AND owner_id = $2`,
-          [row.jop_id, userId]
-        );
+        const children = await pool.query(`SELECT id, content FROM items WHERE jop_parent_id = $1 AND owner_id = $2`, [row.jop_id, userId]);
         const alive = children.rows.filter((c: any) => !parseJoplinContent(c.content).isDeleted);
         if (alive.length > 0) {
-          return { content: [{ type: "text" as const, text: `Notebook "${parsed.title}" is not empty (${alive.length} item(s)). Move or delete its notes and sub-notebooks first.` }], isError: true };
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Notebook "${parsed.title}" is not empty (${alive.length} item(s)). Move or delete its notes and sub-notebooks first.`,
+              },
+            ],
+            isError: true,
+          };
         }
         const now = Date.now();
         // Soft delete: set deleted_time, preserving all other fields (incl. the 'icon' string)
         const json = { ...parseRawJson(row.content), deleted_time: now, user_updated_time: now };
         const contentBytes = Buffer.from(JSON.stringify(json), "utf-8");
-        await pool.query(
-          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`,
-          [contentBytes, contentBytes.length, now, now, notebook_id]
-        );
+        await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $4 WHERE id = $5`, [
+          contentBytes,
+          contentBytes.length,
+          now,
+          now,
+          notebook_id,
+        ]);
         await recordChange({ itemId: notebook_id, itemType: JOP_TYPE_FOLDER, changeType: CHANGE_DELETED, jopId: row.jop_id, userId });
-        return { content: [{ type: "text" as const, text: `Notebook moved to the trash: **${parsed.title}**\nID: ${notebook_id}\nThe notebook sits in the Joplin trash.` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Notebook moved to the trash: **${parsed.title}**\nID: ${notebook_id}\nThe notebook sits in the Joplin trash.`,
+            },
+          ],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
   // ====== RESOURCE (ATTACHMENT) TOOLS ======
 
-  server.tool("list_note_attachments", "List the file attachments (resources) of a note. Returns resource IDs usable with `get_resource`, `download_resource`, `attach_resource_to_note` and `unlink_resource_from_note`.",
+  server.tool(
+    "list_note_attachments",
+    "List the file attachments (resources) of a note. Returns resource IDs usable with `get_resource`, `download_resource`, `attach_resource_to_note` and `unlink_resource_from_note`.",
     {
       note_id: z.string().describe("The ID of the note (MCP id or Joplin 32-hex id)"),
-      limit: z.number().default(50).describe("Max attachments to return")
+      limit: z.number().default(50).describe("Max attachments to return"),
     },
     async ({ note_id, limit }) => {
       try {
@@ -1450,20 +1535,26 @@ function createMcpServer(): McpServer {
           `SELECT id, name, content, jop_id, jop_parent_id, jop_type, content_size, updated_time
            FROM items WHERE owner_id = $1 AND jop_type = $2 AND jop_id = ANY($3::text[])
            ORDER BY updated_time DESC LIMIT $4`,
-          [userId, JOP_TYPE_RESOURCE, Array.from(resourceJopIds), Math.min(limit, 200)]
+          [userId, JOP_TYPE_RESOURCE, Array.from(resourceJopIds), Math.min(limit, 200)],
         );
         const resources = (rows.rows as JoplinItemRow[]).map(resourceSummary).filter((r) => !r.isDeleted);
         if (resources.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' has no available attachment.` }] };
-        const lines = resources.map((r) => `**${r.title}** (ID: ${r.id})\n   jop_id: ${r.jopId} · ${formatBytes(r.size)} · ${r.mime}\n   Updated: ${r.updated}`);
+        const lines = resources.map(
+          (r) => `**${r.title}** (ID: ${r.id})\n   jop_id: ${r.jopId} · ${formatBytes(r.size)} · ${r.mime}\n   Updated: ${r.updated}`,
+        );
         return { content: [{ type: "text" as const, text: `Attachments (${resources.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("list_resources", "List the most recently updated file attachments (resources) across all notes. Returns resource IDs for `download_resource` / `attach_resource_to_note`.",
+  server.tool(
+    "list_resources",
+    "List the most recently updated file attachments (resources) across all notes. Returns resource IDs for `download_resource` / `attach_resource_to_note`.",
     {
       limit: z.number().default(20).describe("Max resources"),
-      query: z.string().optional().describe("Optional text filter on the resource title")
+      query: z.string().optional().describe("Optional text filter on the resource title"),
     },
     async ({ limit, query }) => {
       try {
@@ -1479,17 +1570,21 @@ function createMcpServer(): McpServer {
           `SELECT id, name, content, jop_id, jop_parent_id, jop_type, content_size, updated_time
            FROM items WHERE ${conditions.join(" AND ")}
            ORDER BY updated_time DESC LIMIT $${params.length}`,
-          params
+          params,
         );
         const resources = (rows.rows as JoplinItemRow[]).map(resourceSummary).filter((r) => !r.isDeleted);
         if (resources.length === 0) return { content: [{ type: "text" as const, text: "No attachment found." }] };
         const lines = resources.map((r) => `**${r.title}** (ID: ${r.id})\n   ${formatBytes(r.size)} · ${r.mime} · ${r.updated}`);
         return { content: [{ type: "text" as const, text: `Recent attachments (${resources.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("get_resource", "Get the metadata of a file attachment (resource): title, MIME type, size, blob presence and the notes that reference it. Use `download_resource` for the bytes.",
+  server.tool(
+    "get_resource",
+    "Get the metadata of a file attachment (resource): title, MIME type, size, blob presence and the notes that reference it. Use `download_resource` for the bytes.",
     { resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)") },
     async ({ resource_id }) => {
       try {
@@ -1508,17 +1603,24 @@ function createMcpServer(): McpServer {
           `Updated: ${summary.updated}`,
           `Blob: ${blob ? `${formatBytes(blob.content_size)} stored` : "missing"}`,
           `Referenced by ${usage.rows.length} note(s)`,
-          `Download: ${MCP_PUBLIC_URL}/files/${summary.id} (Authorization: Bearer <MCP key> header)`
+          `Download: ${MCP_PUBLIC_URL}/files/${summary.id} (Authorization: Bearer <MCP key> header)`,
         ].join("\n");
         return { content: [{ type: "text" as const, text }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("download_resource", "Download a file attachment (resource) and return its bytes as base64. Inline output is capped (default 10 MiB, max 32 MiB); for bigger files use the GET /files/<id> endpoint of this server instead.",
+  server.tool(
+    "download_resource",
+    "Download a file attachment (resource) and return its bytes as base64. Inline output is capped (default 10 MiB, max 32 MiB); for bigger files use the GET /files/<id> endpoint of this server instead.",
     {
       resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)"),
-      max_bytes: z.number().optional().describe(`Inline size cap in bytes (default ${DEFAULT_INLINE_DOWNLOAD_MAX_BYTES}, max ${HARD_INLINE_DOWNLOAD_MAX_BYTES})`)
+      max_bytes: z
+        .number()
+        .optional()
+        .describe(`Inline size cap in bytes (default ${DEFAULT_INLINE_DOWNLOAD_MAX_BYTES}, max ${HARD_INLINE_DOWNLOAD_MAX_BYTES})`),
     },
     async ({ resource_id, max_bytes }) => {
       try {
@@ -1526,43 +1628,61 @@ function createMcpServer(): McpServer {
         const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
         if (!row) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(row);
-        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' is in the trash.` }], isError: true };
+        if (summary.isDeleted)
+          return { content: [{ type: "text" as const, text: `Resource '${resource_id}' is in the trash.` }], isError: true };
         const blob = await findResourceBlob(row.jop_id, userId);
-        if (!blob) return { content: [{ type: "text" as const, text: `No binary content for resource '${resource_id}' (${summary.title}).` }] };
+        if (!blob)
+          return { content: [{ type: "text" as const, text: `No binary content for resource '${resource_id}' (${summary.title}).` }] };
         const cap = Math.min(max_bytes ?? DEFAULT_INLINE_DOWNLOAD_MAX_BYTES, HARD_INLINE_DOWNLOAD_MAX_BYTES);
         if (blob.content.length > cap) {
           return {
-            content: [{
-              type: "text" as const,
-              text: `File too large for an inline reply (${formatBytes(blob.content.length)} > ${formatBytes(cap)}).\n` +
-                `Use the binary endpoint:\n` +
-                `curl -fsSL -H "Authorization: Bearer $JOPLIN_API_KEY" "${MCP_PUBLIC_URL}/files/${summary.id}" -o "${summary.title}"`
-            }],
-            isError: true
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `File too large for an inline reply (${formatBytes(blob.content.length)} > ${formatBytes(cap)}).\n` +
+                  `Use the binary endpoint:\n` +
+                  `curl -fsSL -H "Authorization: Bearer $JOPLIN_API_KEY" "${MCP_PUBLIC_URL}/files/${summary.id}" -o "${summary.title}"`,
+              },
+            ],
+            isError: true,
           };
         }
         const header = `**${summary.title}**\nID: ${summary.id} · jop_id: ${summary.jopId}\n${summary.mime} · ${formatBytes(blob.content.length)}\nBase64 (${summary.fileExtension || "bin"}):`;
         return { content: [{ type: "text" as const, text: `${header}\n${blob.content.toString("base64")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("add_resource", "Attach a file to a note from inline base64 content (small files only, max 32 MiB). Creates the Joplin resource (metadata + binary blob) and, when note_id is provided, appends the markdown link to the note. For bigger files use the POST /files endpoint of this server.",
+  server.tool(
+    "add_resource",
+    "Attach a file to a note from inline base64 content (small files only, max 32 MiB). Creates the Joplin resource (metadata + binary blob) and, when note_id is provided, appends the markdown link to the note. For bigger files use the POST /files endpoint of this server.",
     {
       filename: z.string().describe("File name including extension (used as the resource title)"),
       data_base64: z.string().describe("File content encoded in base64 (data: URL prefix accepted)"),
       note_id: z.string().optional().describe("Optional note ID to attach the new resource to"),
       mime_type: z.string().optional().describe("Optional MIME type (guessed from the extension when omitted)"),
-      as_image: z.boolean().optional().describe("Insert an image link (![...]) instead of a file link")
+      as_image: z.boolean().optional().describe("Insert an image link (![...]) instead of a file link"),
     },
     async ({ filename, data_base64, note_id, mime_type, as_image }) => {
       try {
         const userId = await getUserId();
         const cleaned = data_base64.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
         const data = Buffer.from(cleaned, "base64");
-        if (data.length === 0) return { content: [{ type: "text" as const, text: "Error: empty or invalid base64 content." }], isError: true };
+        if (data.length === 0)
+          return { content: [{ type: "text" as const, text: "Error: empty or invalid base64 content." }], isError: true };
         if (data.length > HARD_INLINE_DOWNLOAD_MAX_BYTES) {
-          return { content: [{ type: "text" as const, text: `File too large for an inline upload (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Use POST /files.` }], isError: true };
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `File too large for an inline upload (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Use POST /files.`,
+              },
+            ],
+            isError: true,
+          };
         }
         let note: JoplinItemRow | null = null;
         if (note_id) {
@@ -1576,21 +1696,27 @@ function createMcpServer(): McpServer {
           attachNote = `\nAttached to note: ${note.id}`;
         }
         return {
-          content: [{
-            type: "text" as const,
-            text: `Attachment created: **${resource.title}**\nID: ${resource.id}\njop_id: ${resource.jopId}\n${formatBytes(resource.size)} · ${resource.mime}${attachNote}`
-          }]
+          content: [
+            {
+              type: "text" as const,
+              text: `Attachment created: **${resource.title}**\nID: ${resource.id}\njop_id: ${resource.jopId}\n${formatBytes(resource.size)} · ${resource.mime}${attachNote}`,
+            },
+          ],
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("attach_resource_to_note", "Append a markdown link to an existing resource (attachment) into a note body. The resource must already exist (see `list_resources` / `add_resource`). Idempotent at the note body level: check `list_note_attachments` first if unsure.",
+  server.tool(
+    "attach_resource_to_note",
+    "Append a markdown link to an existing resource (attachment) into a note body. The resource must already exist (see `list_resources` / `add_resource`). Idempotent at the note body level: check `list_note_attachments` first if unsure.",
     {
       note_id: z.string().describe("The ID of the target note"),
       resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)"),
       label: z.string().optional().describe("Optional link label (defaults to the resource title)"),
-      as_image: z.boolean().optional().describe("Insert an image link (![...]) instead of a file link")
+      as_image: z.boolean().optional().describe("Insert an image link (![...]) instead of a file link"),
     },
     async ({ note_id, resource_id, label, as_image }) => {
       try {
@@ -1600,17 +1726,22 @@ function createMcpServer(): McpServer {
         const resource = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
         if (!resource) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(resource);
-        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' is in the trash.` }], isError: true };
+        if (summary.isDeleted)
+          return { content: [{ type: "text" as const, text: `Resource '${resource_id}' is in the trash.` }], isError: true };
         await appendResourceLinkToNote(note, label || summary.title, resource.jop_id, as_image === true);
         return { content: [{ type: "text" as const, text: `Attachment linked: **${summary.title}**\nNote: ${note.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("unlink_resource_from_note", "Remove the markdown links pointing at a resource from a note body. The resource itself is kept (it can stay attached to other notes or be downloaded later).",
+  server.tool(
+    "unlink_resource_from_note",
+    "Remove the markdown links pointing at a resource from a note body. The resource itself is kept (it can stay attached to other notes or be downloaded later).",
     {
       note_id: z.string().describe("The ID of the note"),
-      resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)")
+      resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)"),
     },
     async ({ note_id, resource_id }) => {
       try {
@@ -1622,21 +1753,28 @@ function createMcpServer(): McpServer {
         const removed = await removeResourceLinksFromNote(note, resource.jop_id);
         const summary = resourceSummary(resource);
         return {
-          content: [{
-            type: "text" as const,
-            text: removed > 0
-              ? `Link removed (${removed} occurrence(s)).\nAttachment: ${summary.title}\nNote: ${note.id}\nThe resource still exists in Joplin.`
-              : `No link to '${summary.title}' in note ${note.id}.`
-          }]
+          content: [
+            {
+              type: "text" as const,
+              text:
+                removed > 0
+                  ? `Link removed (${removed} occurrence(s)).\nAttachment: ${summary.title}\nNote: ${note.id}\nThe resource still exists in Joplin.`
+                  : `No link to '${summary.title}' in note ${note.id}.`,
+            },
+          ],
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("delete_resource", "Delete a file attachment (resource): soft delete to the Joplin trash, same semantics as delete_note. The binary blob stays on the server until the trash is emptied from a client. Refuses when the resource is still linked from notes unless `force` is set (note bodies would keep dangling links).",
+  server.tool(
+    "delete_resource",
+    "Delete a file attachment (resource): soft delete to the Joplin trash, same semantics as delete_note. The binary blob stays on the server until the trash is emptied from a client. Refuses when the resource is still linked from notes unless `force` is set (note bodies would keep dangling links).",
     {
       resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)"),
-      force: z.boolean().optional().describe("Delete even when still referenced by notes")
+      force: z.boolean().optional().describe("Delete even when still referenced by notes"),
     },
     async ({ resource_id, force }) => {
       try {
@@ -1644,45 +1782,67 @@ function createMcpServer(): McpServer {
         const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
         if (!row) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(row);
-        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Resource '${summary.title}' is already in the trash.` }], isError: true };
+        if (summary.isDeleted)
+          return { content: [{ type: "text" as const, text: `Resource '${summary.title}' is already in the trash.` }], isError: true };
         const refs = await pool.query(`SELECT item_id FROM item_resources WHERE resource_id = $1`, [row.jop_id]);
         if (refs.rows.length > 0 && force !== true) {
-          const noteRows = await pool.query(`SELECT id, content FROM items WHERE id = ANY($1::text[])`, [refs.rows.map((r: any) => r.item_id)]);
+          const noteRows = await pool.query(`SELECT id, content FROM items WHERE id = ANY($1::text[])`, [
+            refs.rows.map((r: any) => r.item_id),
+          ]);
           const titles = noteRows.rows.map((r: any) => parseJoplinContent(r.content).title || r.id);
           return {
-            content: [{
-              type: "text" as const,
-              text: `Resource '${summary.title}' is still referenced by ${refs.rows.length} note(s): ${titles.join(", ")}.\n` +
-                `Run unlink_resource_from_note first, or retry with force=true.`
-            }],
-            isError: true
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Resource '${summary.title}' is still referenced by ${refs.rows.length} note(s): ${titles.join(", ")}.\n` +
+                  `Run unlink_resource_from_note first, or retry with force=true.`,
+              },
+            ],
+            isError: true,
           };
         }
         const now = Date.now();
         const json = { ...parseRawJson(row.content), deleted_time: now, user_updated_time: now };
         const contentBytes = Buffer.from(JSON.stringify(json), "utf-8");
-        await pool.query(
-          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-          [contentBytes, contentBytes.length, now, row.id]
-        );
-        await recordChange({ itemId: row.id, itemType: JOP_TYPE_RESOURCE, changeType: CHANGE_DELETED, jopId: row.jop_id, userId, changeItemType: 2 });
-        const linksNote = refs.rows.length > 0 ? `\n${refs.rows.length} link(s) remain in note bodies (they render as a missing attachment).` : "";
+        await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+          contentBytes,
+          contentBytes.length,
+          now,
+          row.id,
+        ]);
+        await recordChange({
+          itemId: row.id,
+          itemType: JOP_TYPE_RESOURCE,
+          changeType: CHANGE_DELETED,
+          jopId: row.jop_id,
+          userId,
+          changeItemType: 2,
+        });
+        const linksNote =
+          refs.rows.length > 0 ? `\n${refs.rows.length} link(s) remain in note bodies (they render as a missing attachment).` : "";
         return {
-          content: [{
-            type: "text" as const,
-            text: `Attachment moved to the trash: **${summary.title}**\nID: ${summary.id}\nThe binary stays on the server until the trash is purged.${linksNote}`
-          }]
+          content: [
+            {
+              type: "text" as const,
+              text: `Attachment moved to the trash: **${summary.title}**\nID: ${summary.id}\nThe binary stays on the server until the trash is purged.${linksNote}`,
+            },
+          ],
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("update_resource", "Replace the binary content of an existing attachment (new version of a file). Ids are preserved, so every link already present in note bodies keeps working. Inline base64 only (max 32 MiB); for bigger files use `PUT /files/<id>` with the raw body.",
+  server.tool(
+    "update_resource",
+    "Replace the binary content of an existing attachment (new version of a file). Ids are preserved, so every link already present in note bodies keeps working. Inline base64 only (max 32 MiB); for bigger files use `PUT /files/<id>` with the raw body.",
     {
       resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)"),
       data_base64: z.string().describe("New file content encoded in base64 (data: URL prefix accepted)"),
       filename: z.string().optional().describe("Optional new file name (updates the resource title and extension)"),
-      mime_type: z.string().optional().describe("Optional MIME type (guessed from the file name when omitted)")
+      mime_type: z.string().optional().describe("Optional MIME type (guessed from the file name when omitted)"),
     },
     async ({ resource_id, data_base64, filename, mime_type }) => {
       try {
@@ -1690,28 +1850,52 @@ function createMcpServer(): McpServer {
         const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
         if (!row) return { content: [{ type: "text" as const, text: `Attachment '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(row);
-        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `"${summary.title}" is in the trash: restore it with restore_item before replacing its content.` }], isError: true };
+        if (summary.isDeleted)
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `"${summary.title}" is in the trash: restore it with restore_item before replacing its content.`,
+              },
+            ],
+            isError: true,
+          };
         const cleaned = data_base64.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
         const data = Buffer.from(cleaned, "base64");
-        if (data.length === 0) return { content: [{ type: "text" as const, text: "Error: empty or invalid base64 content." }], isError: true };
+        if (data.length === 0)
+          return { content: [{ type: "text" as const, text: "Error: empty or invalid base64 content." }], isError: true };
         if (data.length > HARD_INLINE_DOWNLOAD_MAX_BYTES) {
-          return { content: [{ type: "text" as const, text: `File too large for an inline replacement (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Use PUT /files/${summary.id}.` }], isError: true };
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `File too large for an inline replacement (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Use PUT /files/${summary.id}.`,
+              },
+            ],
+            isError: true,
+          };
         }
         const result = await replaceResourceContent({ resource: row, data, mime: mime_type, filename, userId });
         return {
-          content: [{
-            type: "text" as const,
-            text: `Content replaced: **${result.title}**\nID: ${result.id}\njop_id: ${result.jopId} (unchanged, so note links stay valid)\n${formatBytes(result.sizeBefore)} → ${formatBytes(result.size)} · ${result.mime}`
-          }]
+          content: [
+            {
+              type: "text" as const,
+              text: `Content replaced: **${result.title}**\nID: ${result.id}\njop_id: ${result.jopId} (unchanged, so note links stay valid)\n${formatBytes(result.sizeBefore)} → ${formatBytes(result.size)} · ${result.mime}`,
+            },
+          ],
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("list_trash", "List the items currently sitting in the Joplin trash: notes and resources deleted but not purged. Use `restore_item` to bring one back.",
+  server.tool(
+    "list_trash",
+    "List the items currently sitting in the Joplin trash: notes and resources deleted but not purged. Use `restore_item` to bring one back.",
     {
       kind: z.enum(["all", "notes", "resources"]).default("all").describe("Restrict the listing to notes, resources, or both"),
-      limit: z.number().default(50).describe("Max items to return")
+      limit: z.number().default(50).describe("Max items to return"),
     },
     async ({ kind, limit }) => {
       try {
@@ -1723,7 +1907,7 @@ function createMcpServer(): McpServer {
            WHERE owner_id = $1 AND jop_type = ANY($2::int[])
              AND encode(content, 'escape') ~ '"deleted_time"[[:space:]]*:[[:space:]]*[1-9]'
            ORDER BY updated_time DESC LIMIT $3`,
-          [userId, types, Math.min(limit, 200)]
+          [userId, types, Math.min(limit, 200)],
         );
         const items = (rows.rows as JoplinItemRow[])
           .map((row) => {
@@ -1734,26 +1918,35 @@ function createMcpServer(): McpServer {
               type: row.jop_type === JOP_TYPE_NOTE ? "note" : "resource",
               title: String(json.title || "(untitled)"),
               deletedAt: formatTimestamp(Number(json.deleted_time || 0)),
-              size: Number(json.size || 0)
+              size: Number(json.size || 0),
             };
           })
           .filter((i) => i.deletedAt !== "N/A");
         if (items.length === 0) return { content: [{ type: "text" as const, text: "The trash is empty." }] };
-        const lines = items.map((i) =>
-          `**${i.title}** (${i.type})\n   ID: ${i.id} · jop_id: ${i.jopId} · deleted ${i.deletedAt}${i.type === "resource" ? ` · ${formatBytes(i.size)}` : ""}`
+        const lines = items.map(
+          (i) =>
+            `**${i.title}** (${i.type})\n   ID: ${i.id} · jop_id: ${i.jopId} · deleted ${i.deletedAt}${i.type === "resource" ? ` · ${formatBytes(i.size)}` : ""}`,
         );
         return { content: [{ type: "text" as const, text: `Trash (${items.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("restore_item", "Restore an item from the Joplin trash (note or resource): clears deleted_time and records an update so synced clients bring it back. The original ids (and therefore the note links) are preserved.",
+  server.tool(
+    "restore_item",
+    "Restore an item from the Joplin trash (note or resource): clears deleted_time and records an update so synced clients bring it back. The original ids (and therefore the note links) are preserved.",
     { item_id: z.string().describe("The note or resource ID (MCP id or Joplin 32-hex id)") },
     async ({ item_id }) => {
       try {
         const userId = await getUserId();
         const row = (await findItem(item_id, JOP_TYPE_NOTE, userId)) || (await findItem(item_id, JOP_TYPE_RESOURCE, userId));
-        if (!row) return { content: [{ type: "text" as const, text: `Item '${item_id}' not found (neither a note nor a resource).` }], isError: true };
+        if (!row)
+          return {
+            content: [{ type: "text" as const, text: `Item '${item_id}' not found (neither a note nor a resource).` }],
+            isError: true,
+          };
         const json = parseRawJson(row.content);
         const title = String(json.title || "(untitled)");
         if (!(Number(json.deleted_time || 0) > 0)) {
@@ -1761,20 +1954,33 @@ function createMcpServer(): McpServer {
         }
         const now = Date.now();
         const contentBytes = Buffer.from(JSON.stringify({ ...json, deleted_time: 0, user_updated_time: now }), "utf-8");
-        await pool.query(
-          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-          [contentBytes, contentBytes.length, now, row.id]
-        );
-        await recordChange({ itemId: row.id, itemType: row.jop_type, changeType: CHANGE_UPDATED, jopId: row.jop_id, userId, changeItemType: 1 });
+        await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+          contentBytes,
+          contentBytes.length,
+          now,
+          row.id,
+        ]);
+        await recordChange({
+          itemId: row.id,
+          itemType: row.jop_type,
+          changeType: CHANGE_UPDATED,
+          jopId: row.jop_id,
+          userId,
+          changeItemType: 1,
+        });
         const kindLabel = row.jop_type === JOP_TYPE_NOTE ? "Note" : "Attachment";
         return { content: [{ type: "text" as const, text: `${kindLabel} restored: **${title}**\nID: ${row.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
   // ====== TAG TOOLS ======
 
-  server.tool("list_tags", "List all Joplin tags with their note counts. Use the returned tag ID with `attach_tag_to_note` / `detach_tag_from_note`.",
+  server.tool(
+    "list_tags",
+    "List all Joplin tags with their note counts. Use the returned tag ID with `attach_tag_to_note` / `detach_tag_from_note`.",
     {},
     async () => {
       try {
@@ -1782,7 +1988,7 @@ function createMcpServer(): McpServer {
         const tags = await pool.query(
           `SELECT id, name, content, jop_id, jop_parent_id, jop_type, content_size, updated_time
            FROM items WHERE owner_id = $1 AND jop_type = $2 ORDER BY updated_time DESC`,
-          [userId, JOP_TYPE_TAG]
+          [userId, JOP_TYPE_TAG],
         );
         const relations = await pool.query(`SELECT content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
         const counts = new Map<string, number>();
@@ -1793,17 +1999,26 @@ function createMcpServer(): McpServer {
           counts.set(tagId, (counts.get(tagId) || 0) + 1);
         }
         const alive = (tags.rows as JoplinItemRow[])
-          .filter((row) => !(parseJoplinContent(row.content).isDeleted))
-          .map((row) => ({ id: row.id, jopId: row.jop_id, title: parseJoplinContent(row.content).title, count: counts.get(row.jop_id) || 0 }))
+          .filter((row) => !parseJoplinContent(row.content).isDeleted)
+          .map((row) => ({
+            id: row.id,
+            jopId: row.jop_id,
+            title: parseJoplinContent(row.content).title,
+            count: counts.get(row.jop_id) || 0,
+          }))
           .sort((a, b) => a.title.localeCompare(b.title));
         if (alive.length === 0) return { content: [{ type: "text" as const, text: "No tags found." }] };
         const lines = alive.map((t) => `**${t.title}** (ID: ${t.id}) - ${t.count} note(s)`);
         return { content: [{ type: "text" as const, text: `Tags (${alive.length}):\n\n${lines.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("add_tag", "Create a new Joplin tag. Returns the tag ID for `attach_tag_to_note`.",
+  server.tool(
+    "add_tag",
+    "Create a new Joplin tag. Returns the tag ID for `attach_tag_to_note`.",
     { title: z.string().describe("Tag title") },
     async ({ title }) => {
       try {
@@ -1812,10 +2027,13 @@ function createMcpServer(): McpServer {
         if (!trimmed) return { content: [{ type: "text" as const, text: "Error: the tag title is empty." }] };
         const existing = await pool.query(
           `SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2 AND encode(content, 'escape') ILIKE $3`,
-          [userId, JOP_TYPE_TAG, `%${trimmed}%`]
+          [userId, JOP_TYPE_TAG, `%${trimmed}%`],
         );
-        const duplicate = existing.rows.find((row: any) => parseJoplinContent(row.content).title === trimmed && !parseJoplinContent(row.content).isDeleted);
-        if (duplicate) return { content: [{ type: "text" as const, text: `Tag "${trimmed}" already exists (ID: ${duplicate.id}).` }], isError: true };
+        const duplicate = existing.rows.find(
+          (row: any) => parseJoplinContent(row.content).title === trimmed && !parseJoplinContent(row.content).isDeleted,
+        );
+        if (duplicate)
+          return { content: [{ type: "text" as const, text: `Tag "${trimmed}" already exists (ID: ${duplicate.id}).` }], isError: true };
         const tagId = generateId();
         const jopId = generateJopId();
         const now = Date.now();
@@ -1823,23 +2041,30 @@ function createMcpServer(): McpServer {
         await pool.query(
           `INSERT INTO items (id, name, mime_type, updated_time, created_time, content, content_size, jop_id, jop_parent_id, jop_share_id, jop_type, jop_encryption_applied, jop_updated_time, owner_id, content_storage_id)
            VALUES ($1, $2, 'text/markdown', $3, $3, $4, $5, $6, '', '', $7, 0, $3, $8, 1)`,
-          [tagId, `${jopId}.md`, now, contentBytes, contentBytes.length, jopId, JOP_TYPE_TAG, userId]
+          [tagId, `${jopId}.md`, now, contentBytes, contentBytes.length, jopId, JOP_TYPE_TAG, userId],
         );
         await recordUserItem({ itemId: tagId, userId });
         await recordChange({ itemId: tagId, itemType: JOP_TYPE_TAG, changeType: CHANGE_CREATED, jopId, userId, changeItemType: 2 });
         return { content: [{ type: "text" as const, text: `Tag created: **${trimmed}**\nID: ${tagId}\njop_id: ${jopId}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("list_note_tags", "List the tags assigned to a note.",
+  server.tool(
+    "list_note_tags",
+    "List the tags assigned to a note.",
     { note_id: z.string().describe("The ID of the note") },
     async ({ note_id }) => {
       try {
         const userId = await getUserId();
         const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
         if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
-        const relations = await pool.query(`SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
+        const relations = await pool.query(`SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_NOTE_TAG,
+        ]);
         const tagJopIds = relations.rows
           .map((row: any) => ({ row, json: parseRawJson(row.content) }))
           .filter(({ json }: any) => json.note_id === note.jop_id && Number(json.deleted_time || 0) === 0)
@@ -1848,7 +2073,7 @@ function createMcpServer(): McpServer {
         const tags = await pool.query(
           `SELECT id, name, content, jop_id, jop_parent_id, jop_type, content_size, updated_time
            FROM items WHERE owner_id = $1 AND jop_type = $2 AND jop_id = ANY($3::text[])`,
-          [userId, JOP_TYPE_TAG, tagJopIds]
+          [userId, JOP_TYPE_TAG, tagJopIds],
         );
         const tagsList = (tags.rows as JoplinItemRow[])
           .map((row) => ({ id: row.id, title: parseJoplinContent(row.content).title }))
@@ -1856,14 +2081,18 @@ function createMcpServer(): McpServer {
           .sort((a, b) => a.title.localeCompare(b.title));
         const lines = tagsList.map((t) => `**${t.title}** (ID: ${t.id})`);
         return { content: [{ type: "text" as const, text: `Tags on the note (${tagsList.length}):\n\n${lines.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("attach_tag_to_note", "Assign a tag to a note. Creates the note<->tag relation item used by Joplin sync; no-op if the tag is already assigned.",
+  server.tool(
+    "attach_tag_to_note",
+    "Assign a tag to a note. Creates the note<->tag relation item used by Joplin sync; no-op if the tag is already assigned.",
     {
       note_id: z.string().describe("The ID of the note"),
-      tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)")
+      tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
     },
     async ({ note_id, tag_id }) => {
       try {
@@ -1872,13 +2101,22 @@ function createMcpServer(): McpServer {
         if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
         if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
-        const relations = await pool.query(`SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
+        const relations = await pool.query(`SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_NOTE_TAG,
+        ]);
         const already = relations.rows.some((row: any) => {
           const json = parseRawJson(row.content);
-          return String(json.tag_id || "") === tag.jop_id && String(json.note_id || "") === note.jop_id && Number(json.deleted_time || 0) === 0;
+          return (
+            String(json.tag_id || "") === tag.jop_id && String(json.note_id || "") === note.jop_id && Number(json.deleted_time || 0) === 0
+          );
         });
         if (already) {
-          return { content: [{ type: "text" as const, text: `Tag "${parseJoplinContent(tag.content).title}" is already assigned to note ${note.id}.` }] };
+          return {
+            content: [
+              { type: "text" as const, text: `Tag "${parseJoplinContent(tag.content).title}" is already assigned to note ${note.id}.` },
+            ],
+          };
         }
         const relId = generateId();
         const jopId = generateJopId();
@@ -1887,19 +2125,25 @@ function createMcpServer(): McpServer {
         await pool.query(
           `INSERT INTO items (id, name, mime_type, updated_time, created_time, content, content_size, jop_id, jop_parent_id, jop_share_id, jop_type, jop_encryption_applied, jop_updated_time, owner_id, content_storage_id)
            VALUES ($1, $2, 'text/markdown', $3, $3, $4, $5, $6, '', '', $7, 0, $3, $8, 1)`,
-          [relId, `${jopId}.md`, now, contentBytes, contentBytes.length, jopId, JOP_TYPE_NOTE_TAG, userId]
+          [relId, `${jopId}.md`, now, contentBytes, contentBytes.length, jopId, JOP_TYPE_NOTE_TAG, userId],
         );
         await recordUserItem({ itemId: relId, userId });
         await recordChange({ itemId: relId, itemType: JOP_TYPE_NOTE_TAG, changeType: CHANGE_CREATED, jopId, userId, changeItemType: 2 });
-        return { content: [{ type: "text" as const, text: `Tag assigned: **${parseJoplinContent(tag.content).title}**\nNote: ${note.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        return {
+          content: [{ type: "text" as const, text: `Tag assigned: **${parseJoplinContent(tag.content).title}**\nNote: ${note.id}` }],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("detach_tag_from_note", "Remove a tag from a note (soft-deletes the note<->tag relation item). The tag itself is kept.",
+  server.tool(
+    "detach_tag_from_note",
+    "Remove a tag from a note (soft-deletes the note<->tag relation item). The tag itself is kept.",
     {
       note_id: z.string().describe("The ID of the note"),
-      tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)")
+      tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
     },
     async ({ note_id, tag_id }) => {
       try {
@@ -1908,33 +2152,57 @@ function createMcpServer(): McpServer {
         if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
         if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
-        const relations = await pool.query(`SELECT id, content, jop_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
+        const relations = await pool.query(`SELECT id, content, jop_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_NOTE_TAG,
+        ]);
         const matches = relations.rows.filter((row: any) => {
           const json = parseRawJson(row.content);
-          return String(json.tag_id || "") === tag.jop_id && String(json.note_id || "") === note.jop_id && Number(json.deleted_time || 0) === 0;
+          return (
+            String(json.tag_id || "") === tag.jop_id && String(json.note_id || "") === note.jop_id && Number(json.deleted_time || 0) === 0
+          );
         });
         if (matches.length === 0) {
-          return { content: [{ type: "text" as const, text: `Tag "${parseJoplinContent(tag.content).title}" is not assigned to note ${note.id}.` }] };
+          return {
+            content: [
+              { type: "text" as const, text: `Tag "${parseJoplinContent(tag.content).title}" is not assigned to note ${note.id}.` },
+            ],
+          };
         }
         const now = Date.now();
         for (const rel of matches) {
           const json = { ...parseRawJson(rel.content), deleted_time: now, user_updated_time: now };
           const contentBytes = Buffer.from(JSON.stringify(json), "utf-8");
-          await pool.query(
-            `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-            [contentBytes, contentBytes.length, now, rel.id]
-          );
-          await recordChange({ itemId: rel.id, itemType: JOP_TYPE_NOTE_TAG, changeType: CHANGE_DELETED, jopId: rel.jop_id, userId, changeItemType: 2 });
+          await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+            contentBytes,
+            contentBytes.length,
+            now,
+            rel.id,
+          ]);
+          await recordChange({
+            itemId: rel.id,
+            itemType: JOP_TYPE_NOTE_TAG,
+            changeType: CHANGE_DELETED,
+            jopId: rel.jop_id,
+            userId,
+            changeItemType: 2,
+          });
         }
-        return { content: [{ type: "text" as const, text: `Tag removed: **${parseJoplinContent(tag.content).title}**\nNote: ${note.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        return {
+          content: [{ type: "text" as const, text: `Tag removed: **${parseJoplinContent(tag.content).title}**\nNote: ${note.id}` }],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("list_notes_with_tag", "List the notes carrying a tag, most recently updated first (resolves the note<->tag relations used by Joplin sync).",
+  server.tool(
+    "list_notes_with_tag",
+    "List the notes carrying a tag, most recently updated first (resolves the note<->tag relations used by Joplin sync).",
     {
       tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
-      limit: z.number().default(50).describe("Max notes to return")
+      limit: z.number().default(50).describe("Max notes to return"),
     },
     async ({ tag_id, limit }) => {
       try {
@@ -1942,7 +2210,8 @@ function createMcpServer(): McpServer {
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
         if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
         const tagTitle = parseJoplinContent(tag.content).title;
-        if (parseJoplinContent(tag.content).isDeleted) return { content: [{ type: "text" as const, text: `Tag "${tagTitle}" is in the trash.` }], isError: true };
+        if (parseJoplinContent(tag.content).isDeleted)
+          return { content: [{ type: "text" as const, text: `Tag "${tagTitle}" is in the trash.` }], isError: true };
         const relations = await pool.query(`SELECT content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
         const noteJopIds = relations.rows
           .map((row: any) => parseRawJson(row.content))
@@ -1952,9 +2221,12 @@ function createMcpServer(): McpServer {
         const notes = await pool.query(
           `SELECT id, content, jop_id, jop_parent_id, updated_time FROM items
            WHERE owner_id = $1 AND jop_type = $2 AND jop_id = ANY($3::text[])`,
-          [userId, JOP_TYPE_NOTE, noteJopIds]
+          [userId, JOP_TYPE_NOTE, noteJopIds],
         );
-        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_FOLDER]);
+        const folders = await pool.query(`SELECT jop_id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_FOLDER,
+        ]);
         const folderTitles = new Map<string, string>();
         for (const f of folders.rows as JoplinItemRow[]) folderTitles.set(String(f.jop_id), parseJoplinContent(f.content).title);
         const alive = (notes.rows as JoplinItemRow[])
@@ -1963,22 +2235,35 @@ function createMcpServer(): McpServer {
             title: parseJoplinContent(row.content).title,
             deleted: parseJoplinContent(row.content).isDeleted,
             notebook: folderTitles.get(String(row.jop_parent_id)) || "",
-            updated: Number(row.updated_time)
+            updated: Number(row.updated_time),
           }))
           .filter((n) => !n.deleted)
           .sort((a, b) => b.updated - a.updated);
         if (alive.length === 0) return { content: [{ type: "text" as const, text: `Tag "${tagTitle}" is assigned to no live note.` }] };
         const shown = alive.slice(0, Math.min(limit, 200));
-        const lines = shown.map((n) => `**${n.title}**\n   ID: ${n.id}${n.notebook ? ` · notebook: ${n.notebook}` : ""} · updated ${formatTimestamp(n.updated)}`);
-        return { content: [{ type: "text" as const, text: `Notes with tag "${tagTitle}" (${alive.length}, ${shown.length} shown):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        const lines = shown.map(
+          (n) => `**${n.title}**\n   ID: ${n.id}${n.notebook ? ` · notebook: ${n.notebook}` : ""} · updated ${formatTimestamp(n.updated)}`,
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Notes with tag "${tagTitle}" (${alive.length}, ${shown.length} shown):\n\n${lines.join("\n\n")}`,
+            },
+          ],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("rename_tag", "Rename a tag. The tag id is kept, so every note assignment survives.",
+  server.tool(
+    "rename_tag",
+    "Rename a tag. The tag id is kept, so every note assignment survives.",
     {
       tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
-      title: z.string().describe("New tag title")
+      title: z.string().describe("New tag title"),
     },
     async ({ tag_id, title }) => {
       try {
@@ -1986,34 +2271,58 @@ function createMcpServer(): McpServer {
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
         if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
         const current = parseJoplinContent(tag.content);
-        if (current.isDeleted) return { content: [{ type: "text" as const, text: `Tag "${current.title}" is in the trash.` }], isError: true };
+        if (current.isDeleted)
+          return { content: [{ type: "text" as const, text: `Tag "${current.title}" is in the trash.` }], isError: true };
         const trimmed = title.trim();
         if (!trimmed) return { content: [{ type: "text" as const, text: "Error: the new title is empty." }] };
-        if (trimmed === current.title) return { content: [{ type: "text" as const, text: `The tag is already called "${trimmed}" (ID: ${tag.id}).` }] };
-        const others = await pool.query(
-          `SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2 AND id <> $3`,
-          [userId, JOP_TYPE_TAG, tag.id]
-        );
+        if (trimmed === current.title)
+          return { content: [{ type: "text" as const, text: `The tag is already called "${trimmed}" (ID: ${tag.id}).` }] };
+        const others = await pool.query(`SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2 AND id <> $3`, [
+          userId,
+          JOP_TYPE_TAG,
+          tag.id,
+        ]);
         const clash = others.rows.find((row: any) => {
           const parsed = parseJoplinContent(row.content);
           return !parsed.isDeleted && parsed.title === trimmed;
         });
         if (clash) {
-          return { content: [{ type: "text" as const, text: `A tag "${trimmed}" already exists (ID: ${clash.id}) - renaming would create a duplicate. Use attach_tag_to_note then detach_tag_from_note to merge by hand.` }], isError: true };
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `A tag "${trimmed}" already exists (ID: ${clash.id}) - renaming would create a duplicate. Use attach_tag_to_note then detach_tag_from_note to merge by hand.`,
+              },
+            ],
+            isError: true,
+          };
         }
         const now = Date.now();
         const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(tag.content), title: trimmed, user_updated_time: now }), "utf-8");
-        await pool.query(
-          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-          [contentBytes, contentBytes.length, now, tag.id]
-        );
-        await recordChange({ itemId: tag.id, itemType: JOP_TYPE_TAG, changeType: CHANGE_UPDATED, jopId: tag.jop_id, userId, changeItemType: 1 });
+        await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+          contentBytes,
+          contentBytes.length,
+          now,
+          tag.id,
+        ]);
+        await recordChange({
+          itemId: tag.id,
+          itemType: JOP_TYPE_TAG,
+          changeType: CHANGE_UPDATED,
+          jopId: tag.jop_id,
+          userId,
+          changeItemType: 1,
+        });
         return { content: [{ type: "text" as const, text: `Tag renamed: **${current.title} → ${trimmed}**\nID: ${tag.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
-  server.tool("delete_tag", "Delete a tag: trashes the tag and all its note assignments (soft delete, same as the desktop). The notes themselves are never touched.",
+  server.tool(
+    "delete_tag",
+    "Delete a tag: trashes the tag and all its note assignments (soft delete, same as the desktop). The notes themselves are never touched.",
     { tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)") },
     async ({ tag_id }) => {
       try {
@@ -2021,30 +2330,67 @@ function createMcpServer(): McpServer {
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
         if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
         const parsedTag = parseJoplinContent(tag.content);
-        if (parsedTag.isDeleted) return { content: [{ type: "text" as const, text: `Tag "${parsedTag.title}" is already in the trash.` }], isError: true };
+        if (parsedTag.isDeleted)
+          return { content: [{ type: "text" as const, text: `Tag "${parsedTag.title}" is already in the trash.` }], isError: true };
         const now = Date.now();
-        const relations = await pool.query(`SELECT id, content, jop_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
+        const relations = await pool.query(`SELECT id, content, jop_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [
+          userId,
+          JOP_TYPE_NOTE_TAG,
+        ]);
         const alive = relations.rows.filter((row: any) => {
           const json = parseRawJson(row.content);
           return String(json.tag_id || "") === tag.jop_id && Number(json.deleted_time || 0) === 0;
         });
         for (const rel of alive) {
-          const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(rel.content), deleted_time: now, user_updated_time: now }), "utf-8");
-          await pool.query(
-            `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-            [contentBytes, contentBytes.length, now, rel.id]
+          const contentBytes = Buffer.from(
+            JSON.stringify({ ...parseRawJson(rel.content), deleted_time: now, user_updated_time: now }),
+            "utf-8",
           );
-          await recordChange({ itemId: rel.id, itemType: JOP_TYPE_NOTE_TAG, changeType: CHANGE_DELETED, jopId: rel.jop_id, userId, changeItemType: 2 });
+          await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+            contentBytes,
+            contentBytes.length,
+            now,
+            rel.id,
+          ]);
+          await recordChange({
+            itemId: rel.id,
+            itemType: JOP_TYPE_NOTE_TAG,
+            changeType: CHANGE_DELETED,
+            jopId: rel.jop_id,
+            userId,
+            changeItemType: 2,
+          });
         }
-        const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(tag.content), deleted_time: now, user_updated_time: now }), "utf-8");
-        await pool.query(
-          `UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`,
-          [contentBytes, contentBytes.length, now, tag.id]
+        const contentBytes = Buffer.from(
+          JSON.stringify({ ...parseRawJson(tag.content), deleted_time: now, user_updated_time: now }),
+          "utf-8",
         );
-        await recordChange({ itemId: tag.id, itemType: JOP_TYPE_TAG, changeType: CHANGE_DELETED, jopId: tag.jop_id, userId, changeItemType: 2 });
-        return { content: [{ type: "text" as const, text: `Tag moved to the trash: **${parsedTag.title}**\nID: ${tag.id}\n${alive.length} assignment(s) removed; the notes are untouched.` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
-    }
+        await pool.query(`UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4`, [
+          contentBytes,
+          contentBytes.length,
+          now,
+          tag.id,
+        ]);
+        await recordChange({
+          itemId: tag.id,
+          itemType: JOP_TYPE_TAG,
+          changeType: CHANGE_DELETED,
+          jopId: tag.jop_id,
+          userId,
+          changeItemType: 2,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Tag moved to the trash: **${parsedTag.title}**\nID: ${tag.id}\n${alive.length} assignment(s) removed; the notes are untouched.`,
+            },
+          ],
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+    },
   );
 
   return server;
@@ -2113,8 +2459,9 @@ async function main() {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
       let entry: { transport: StreamableHTTPServerTransport; server: McpServer };
 
-      if (sessionId && sessions.has(sessionId)) {
-        entry = sessions.get(sessionId)!;
+      const existing = sessionId ? sessions.get(sessionId) : undefined;
+      if (existing) {
+        entry = existing;
       } else {
         const mcpServer = createMcpServer();
         const transport = new StreamableHTTPServerTransport({
@@ -2147,8 +2494,8 @@ async function main() {
 
   app.delete("/mcp", (req, res) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    if (sessionId && sessions.has(sessionId)) {
-      const entry = sessions.get(sessionId)!;
+    const entry = sessionId ? sessions.get(sessionId) : undefined;
+    if (sessionId && entry) {
       entry.transport.close();
       sessions.delete(sessionId);
       res.status(200).json({ status: "ok" });
@@ -2163,12 +2510,19 @@ async function main() {
     try {
       const userId = await getUserId();
       const row = await findItem(String(req.params.id), JOP_TYPE_RESOURCE, userId);
-      if (!row) { res.status(404).json({ error: "Resource not found" }); return; }
+      if (!row) {
+        res.status(404).json({ error: "Resource not found" });
+        return;
+      }
       const summary = resourceSummary(row);
       const blob = await findResourceBlob(row.jop_id, userId);
-      if (!blob) { res.status(404).json({ error: "Resource content not found" }); return; }
+      if (!blob) {
+        res.status(404).json({ error: "Resource content not found" });
+        return;
+      }
       const extension = summary.fileExtension;
-      const filename = extension && !summary.title.toLowerCase().endsWith(`.${extension}`) ? `${summary.title}.${extension}` : summary.title;
+      const filename =
+        extension && !summary.title.toLowerCase().endsWith(`.${extension}`) ? `${summary.title}.${extension}` : summary.title;
       res.setHeader("Content-Type", summary.mime || "application/octet-stream");
       res.setHeader("Content-Length", String(blob.content.length));
       res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
@@ -2183,16 +2537,27 @@ async function main() {
     try {
       const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       const filename = String(req.query.filename || (req.headers["x-filename"] as string) || "").trim();
-      if (!filename) { res.status(400).json({ error: "Missing filename: pass ?filename=<name.ext> or the X-Filename header" }); return; }
-      if (data.length === 0) { res.status(400).json({ error: "Empty request body" }); return; }
+      if (!filename) {
+        res.status(400).json({ error: "Missing filename: pass ?filename=<name.ext> or the X-Filename header" });
+        return;
+      }
+      if (data.length === 0) {
+        res.status(400).json({ error: "Empty request body" });
+        return;
+      }
       const userId = await getUserId();
       let note: JoplinItemRow | null = null;
       const noteId = req.query.note_id ? String(req.query.note_id) : "";
       if (noteId) {
         note = await findItem(noteId, JOP_TYPE_NOTE, userId);
-        if (!note) { res.status(404).json({ error: `Note '${noteId}' not found` }); return; }
+        if (!note) {
+          res.status(404).json({ error: `Note '${noteId}' not found` });
+          return;
+        }
       }
-      const contentType = String(req.headers["content-type"] || "").split(";")[0].trim();
+      const contentType = String(req.headers["content-type"] || "")
+        .split(";")[0]
+        .trim();
       const mime = req.query.mime ? String(req.query.mime) : contentType;
       const title = req.query.title ? String(req.query.title) : filename;
       const asImageFlag = String(req.query.as_image || "").toLowerCase();
@@ -2208,7 +2573,7 @@ async function main() {
         size: resource.size,
         note_id: note ? note.id : null,
         link: buildResourceLink(resource.title, resource.jopId, asImage),
-        download_url: `${MCP_PUBLIC_URL}/files/${resource.id}`
+        download_url: `${MCP_PUBLIC_URL}/files/${resource.id}`,
       });
     } catch (e: any) {
       console.error("POST /files error:", e);
@@ -2219,14 +2584,25 @@ async function main() {
   app.put("/files/:id", express.raw({ type: () => true, limit: MAX_UPLOAD_BYTES }), async (req, res) => {
     try {
       const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-      if (data.length === 0) { res.status(400).json({ error: "Empty request body" }); return; }
+      if (data.length === 0) {
+        res.status(400).json({ error: "Empty request body" });
+        return;
+      }
       const userId = await getUserId();
       const row = await findItem(String(req.params.id), JOP_TYPE_RESOURCE, userId);
-      if (!row) { res.status(404).json({ error: "Resource not found" }); return; }
+      if (!row) {
+        res.status(404).json({ error: "Resource not found" });
+        return;
+      }
       const summary = resourceSummary(row);
-      if (summary.isDeleted) { res.status(409).json({ error: "Resource is in the trash: restore it first" }); return; }
+      if (summary.isDeleted) {
+        res.status(409).json({ error: "Resource is in the trash: restore it first" });
+        return;
+      }
       const filename = String(req.query.filename || (req.headers["x-filename"] as string) || "").trim() || undefined;
-      const contentType = String(req.headers["content-type"] || "").split(";")[0].trim();
+      const contentType = String(req.headers["content-type"] || "")
+        .split(";")[0]
+        .trim();
       const mime = req.query.mime ? String(req.query.mime) : contentType || undefined;
       const result = await replaceResourceContent({ resource: row, data, mime, filename, userId });
       res.json({
@@ -2237,7 +2613,7 @@ async function main() {
         mime: result.mime,
         size: result.size,
         previous_size: result.sizeBefore,
-        download_url: `${MCP_PUBLIC_URL}/files/${result.id}`
+        download_url: `${MCP_PUBLIC_URL}/files/${result.id}`,
       });
     } catch (e: any) {
       console.error("PUT /files error:", e);
@@ -2249,12 +2625,16 @@ async function main() {
   app.use(express.json());
 
   // SSE transport
-  app.get("/sse", (req, res) => {
+  app.get("/sse", (_req, res) => {
     console.log("[sse] connection request received");
     const mcpServer = createMcpServer();
     const transport = new SSEServerTransport("/messages", res);
-    transport.onclose = () => { console.log("[sse] session closed"); };
-    mcpServer.connect(transport).catch((err: Error) => { console.error("SSE connection error:", err); });
+    transport.onclose = () => {
+      console.log("[sse] session closed");
+    };
+    mcpServer.connect(transport).catch((err: Error) => {
+      console.error("SSE connection error:", err);
+    });
   });
 
   app.post("/messages", (_req, res) => {
@@ -2270,4 +2650,7 @@ async function main() {
   });
 }
 
-main().catch((e) => { console.error("Fatal error:", e); process.exit(1); });
+main().catch((e) => {
+  console.error("Fatal error:", e);
+  process.exit(1);
+});
