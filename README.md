@@ -34,18 +34,18 @@ before changing anything that touches the database.
 ## Architecture
 
 ```text
-  AI agent (opencode, Claude Code, Cline…)
-        │  MCP over HTTP (streamable-http) + Bearer key
-        ▼
-  ┌─────────────────┐        ┌──────────────────────────────┐
-  │   joplin-mcp    │───────▶│   PostgreSQL (Joplin DB)     │
-  │  Express + SDK  │  SQL   │  items, changes_2,           │
-  │                 │        │  user_items, item_resources  │
-  └────────┬────────┘        └────────────▲─────────────────┘
-           │ raw HTTP (256 MB)            │
-           │ /files/<id>                  │ sync
-           ▼                              │
-      big attachments                     Joplin Server ──▶ desktop / mobile clients
+  AI agent (opencode, Claude Code, Cline...)
+           |  MCP over HTTP (streamable-http) + Bearer key
+           v
+  +-----------------+        +------------------------------+
+  |   joplin-mcp    |------->|   PostgreSQL (Joplin DB)     |
+  |  Express + SDK  |  SQL   |  items, changes_2,           |
+  |                 |        |  user_items, item_resources  |
+  +--------+--------+        +------------^-----------------+
+           | raw HTTP (256 MB)            |
+           | /files/<id>                  | sync
+           v                              |
+    big attachments                       Joplin Server --> desktop / mobile clients
 ```
 
 The MCP server never talks to Joplin Server: it writes where clients read from. A change becomes
