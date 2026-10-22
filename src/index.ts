@@ -53,9 +53,14 @@ async function getUserId(): Promise<string> {
   throw new Error("No user found in Joplin database");
 }
 
-function formatTimestamp(tsMs: number): string {
+function formatTimestamp(tsMs: number | string): string {
   if (!tsMs) return "N/A";
-  try { return new Date(tsMs).toISOString().replace("T", " ").substring(0, 19); }
+  try {
+    // pg returns bigint columns as strings: coerce before building the Date
+    const value = typeof tsMs === "string" ? parseInt(tsMs, 10) : tsMs;
+    if (!Number.isFinite(value) || value <= 0) return "N/A";
+    return new Date(value).toISOString().replace("T", " ").substring(0, 19);
+  }
   catch { return String(tsMs); }
 }
 
@@ -364,8 +369,8 @@ async function linkResourceUsage(noteItemId: string, resourceJopId: string): Pro
   try {
     await pool.query(
       `INSERT INTO item_resources (item_id, resource_id)
-       SELECT $1, $2 WHERE NOT EXISTS (
-         SELECT 1 FROM item_resources WHERE item_id = $1 AND resource_id = $2
+       SELECT $1::varchar, $2::varchar WHERE NOT EXISTS (
+         SELECT 1 FROM item_resources WHERE item_id = $1::varchar AND resource_id = $2::varchar
        )`,
       [noteItemId, resourceJopId]
     );
@@ -507,7 +512,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
     title,
     mime: String(json.mime || guessMime(title)),
     size: Number(json.size || 0),
-    updated: formatTimestamp(row.updated_time),
+    updated: formatTimestamp(Number(row.updated_time)),
     fileExtension: String(json.file_extension || fileExtensionFromName(title)),
     isDeleted: Number(json.deleted_time || 0) > 0
   };
