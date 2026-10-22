@@ -14,18 +14,6 @@ lives in [CHANGELOG.md](CHANGELOG.md) and `git log`.
 - [ ] split the tools by domain (`notes`, `notebooks`, `attachments`, `tags`, `trash`, `history`)
 - [ ] keep the behaviour and every tool schema identical; `docs/sync-shapes.md` stays the reference
 
-### #5 [TESTS] Integration suite
-
-- [x] vitest on the pure layer (39 tests, 98 % of statements) and `create_note` no longer prints a raw
-      `jop_id`
-- [x] coverage gate: 90 % of lines, statements and functions, 85 % of branches on `src/lib/**`
-- [x] GitHub Actions: lint, prettier, markdownlint, typecheck, tests with coverage, build, Docker build
-- [x] CI badge in the README
-- [ ] integration run against a throwaway Joplin Server + PostgreSQL compose (create, update, trash,
-      restore, purge — the cycle applied by hand today), wired into CI
-- [ ] run the README quick-start compose end to end: it doubles as the integration stack, and it has
-      never been executed as written
-
 ### #6 [DISTRIBUTION] Publish what is already built
 
 - [ ] `ghcr.io` image on tag — `build.sh` already defaults to `ghcr.io/openhoat`

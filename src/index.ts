@@ -397,7 +397,7 @@ async function listNoteResourceIds(note: JoplinItemRow): Promise<string[]> {
   return Array.from(ids);
 }
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.10.0" });
+  const server = new McpServer({ name: "joplin", version: "1.11.0" });
 
   // ====== SEARCH / READ TOOLS ======
 

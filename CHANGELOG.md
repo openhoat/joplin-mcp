@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-10-22
+
+### Added
+
+- End-to-end suite (`npm run test:e2e`) against the real stack: the HTTP transport, the public probes,
+  the Bearer refusal, one full lifecycle (notebook, note, todo, attachment with an in-place
+  replacement, tag, trash and restore), the `items` and `changes_2` rows each call must write, and a
+  purge that fails the run while any row still mentions its `e2e-…` prefix. It skips, rather than
+  fails, when the stack is absent.
+- `compose.yml` and `compose.ci.yml` at the repository root: the quick start is a tracked file that CI
+  starts, instead of a YAML block copied out of the README.
+- CI job `integration`: boots that stack, waits for the Joplin schema and for `/health`, runs the
+  suite, then destroys the volumes with `down -v`.
+
+### Changed
+
+- The README quick start points at `compose.yml`; the inline compose block is gone, so the
+  documentation and the tested stack cannot drift apart.
+
 ## [1.10.0] - 2026-10-22
 
 ### Added
@@ -154,6 +173,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - Imported from the `docker-stacks` monorepo into a dedicated repository, unchanged.
 
+[1.11.0]: https://github.com/openhoat/joplin-mcp/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/openhoat/joplin-mcp/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/openhoat/joplin-mcp/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/openhoat/joplin-mcp/compare/v1.8.0...v1.9.0
