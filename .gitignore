@@ -3,3 +3,4 @@ dist/
 buildx-config.toml
 __pycache__/
 .env
+.idea/
