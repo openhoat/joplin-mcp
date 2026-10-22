@@ -316,10 +316,10 @@ async function findItem(idOrJopId: string, jopType: number, userId: string): Pro
 }
 
 function formatBytes(bytes: number): string {
-  if (!bytes || bytes < 0) return "0 o";
-  if (bytes < 1024) return `${bytes} o`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+  if (!bytes || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function fileExtensionFromName(name: string): string {
@@ -466,9 +466,9 @@ async function replaceResourceContent(params: {
     `SELECT id FROM items WHERE owner_id = $1 AND name = $2 LIMIT 1`,
     [userId, `${RESOURCE_BLOB_PREFIX}${resource.jop_id}`]
   );
-  if (blob.rows.length === 0) throw new Error("binaire introuvable pour cette ressource");
+  if (blob.rows.length === 0) throw new Error("no binary content for this resource");
   const now = Date.now();
-  const title = String(params.filename || json.title || "").trim() || "fichier";
+  const title = String(params.filename || json.title || "").trim() || "file";
   const mime = params.mime || (params.filename ? guessMime(params.filename) : String(json.mime || guessMime(title)));
   const meta = {
     ...json,
@@ -603,7 +603,7 @@ async function listNoteResourceIds(note: JoplinItemRow): Promise<string[]> {
 
 function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title: string; mime: string; size: number; updated: string; fileExtension: string; isDeleted: boolean } {
   const json = parseRawJson(row.content);
-  const title = String(json.title || "(sans titre)");
+  const title = String(json.title || "(untitled)");
   return {
     id: row.id,
     jopId: row.jop_id,
@@ -617,7 +617,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.8.0" });
+  const server = new McpServer({ name: "joplin", version: "1.9.0" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -652,16 +652,16 @@ function createMcpServer(): McpServer {
            ORDER BY i.updated_time DESC LIMIT $${paramIdx}`,
           params
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Aucune note trouvée pour '${query}'.` }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `No note found for '${query}'.` }] };
         const notes = result.rows.map((row: any) => {
           const parsed = parseJoplinContent(row.content);
           const isTruncated = parsed.body.length > 200;
           return { id: row.id, title: parsed.title, preview: isTruncated ? parsed.body.substring(0, 200) : parsed.body, isTruncated, isDeleted: parsed.isDeleted, updated: formatTimestamp(row.updated_time) };
         }).filter((n: any) => !n.isDeleted);
-        if (notes.length === 0) return { content: [{ type: "text" as const, text: `Aucune note trouvée pour '${query}'.` }] };
-        const lines = notes.map((n: any) => `📝 **${n.title}** (ID: ${n.id})\n   Mis à jour: ${n.updated}\n   Aperçu: ${n.preview}${n.isTruncated ? "\n   ⚠️ CONTENU TRONQUÉ - Utilise get_note avec cet ID pour lire la note en entier" : ""}`);
-        return { content: [{ type: "text" as const, text: `Trouvé ${notes.length} note(s) pour '${query}':\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        if (notes.length === 0) return { content: [{ type: "text" as const, text: `No note found for '${query}'.` }] };
+        const lines = notes.map((n: any) => `**${n.title}** (ID: ${n.id})\n   Updated: ${n.updated}\n   Preview: ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`);
+        return { content: [{ type: "text" as const, text: `Found ${notes.length} note(s) for '${query}':\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -673,10 +673,10 @@ function createMcpServer(): McpServer {
           `SELECT i.id, i.content, i.updated_time, i.jop_parent_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
           [note_id, JOP_TYPE_NOTE]
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
-        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Note '${note_id}' est dans la corbeille.` }] };
+        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Note '${note_id}' is in the trash.` }], isError: true };
         let notebookName = "";
         if (row.jop_parent_id) {
           // jop_parent_id stores the jop_id (UUID hex), look up by jop_id
@@ -686,11 +686,11 @@ function createMcpServer(): McpServer {
             notebookName = folderParsed.title;
           }
         }
-        let text = `📝 **${parsed.title}**\n`;
-        if (notebookName) text += `📂 Carnet: ${notebookName}\n`;
-        text += `🕐 Mis à jour: ${formatTimestamp(row.updated_time)}\n🆔 ID: ${row.id}\n\n--- Contenu ---\n\n${parsed.body}`;
+        let text = `**${parsed.title}**\n`;
+        if (notebookName) text += `Notebook: ${notebookName}\n`;
+        text += `Updated: ${formatTimestamp(row.updated_time)}\nID: ${row.id}\n\n--- Content ---\n\n${parsed.body}`;
         return { content: [{ type: "text" as const, text }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -717,16 +717,16 @@ function createMcpServer(): McpServer {
           params = [userId, JOP_TYPE_NOTE, Math.min(limit, 50)];
         }
         const result = await pool.query(query, params);
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: "Aucune note trouvée." }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: "No notes found." }] };
         const notes = result.rows.map((row: any) => {
           const parsed = parseJoplinContent(row.content);
           const isTruncated = parsed.body.length > 100;
           return { id: row.id, title: parsed.title, preview: isTruncated ? parsed.body.substring(0, 100) : parsed.body, isTruncated, isDeleted: parsed.isDeleted, updated: formatTimestamp(row.updated_time) };
         }).filter((n: any) => !n.isDeleted);
-        if (notes.length === 0) return { content: [{ type: "text" as const, text: "Aucune note trouvée." }] };
-        const lines = notes.map((n: any) => `📝 **${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   ⚠️ CONTENU TRONQUÉ - Utilise get_note avec cet ID pour lire la note en entier" : ""}`);
-        return { content: [{ type: "text" as const, text: `📝 Notes récentes (${notes.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        if (notes.length === 0) return { content: [{ type: "text" as const, text: "No notes found." }] };
+        const lines = notes.map((n: any) => `**${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`);
+        return { content: [{ type: "text" as const, text: `Recent notes (${notes.length}):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -744,13 +744,13 @@ function createMcpServer(): McpServer {
            ORDER BY i.updated_time DESC LIMIT $4`,
           [userId, JOP_TYPE_FOLDER, `%${query}%`, Math.min(limit, 50)]
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Aucun carnet trouvé pour '${query}'.` }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `No notebook found for '${query}'.` }] };
         const notebooks = result.rows.map((row: any) => {
           const parsed = parseJoplinContent(row.content);
-          return `📂 **${parsed.title}** (ID: ${row.id})`;
+          return `**${parsed.title}** (ID: ${row.id})`;
         });
-        return { content: [{ type: "text" as const, text: `Trouvé ${notebooks.length} carnet(s) pour '${query}':\n\n${notebooks.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Found ${notebooks.length} notebook(s) for '${query}':\n\n${notebooks.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -763,13 +763,13 @@ function createMcpServer(): McpServer {
            WHERE i.owner_id = $1 AND i.jop_type = $2 ORDER BY i.updated_time DESC`,
           [userId, JOP_TYPE_FOLDER]
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: "Aucun carnet trouvé." }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: "No notebooks found." }] };
         const notebooks = result.rows.map((row: any) => {
           const parsed = parseJoplinContent(row.content);
-          return `📂 **${parsed.title}** (ID: ${row.id})`;
+          return `**${parsed.title}** (ID: ${row.id})`;
         });
-        return { content: [{ type: "text" as const, text: `📂 Carnets (${result.rows.length}):\n\n${notebooks.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Notebooks (${result.rows.length}):\n\n${notebooks.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -785,7 +785,7 @@ function createMcpServer(): McpServer {
           `SELECT content FROM items WHERE id = $1 AND jop_type = $2`,
           [notebook_id, JOP_TYPE_FOLDER]
         );
-        if (folderResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' non trouvé. Utilise list_notebooks pour voir les carnets disponibles.` }] };
+        if (folderResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found. Use list_notebooks to see the available notebooks.` }], isError: true };
         const folderParsed = parseJoplinContent(folderResult.rows[0].content);
 
         // notebook_id is base62 'id' - need to look up jop_id for jop_parent_id comparison
@@ -797,16 +797,16 @@ function createMcpServer(): McpServer {
            ORDER BY i.updated_time DESC LIMIT $3`,
           [parentJopId, JOP_TYPE_NOTE, Math.min(limit, 50)]
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Le carnet "${folderParsed.title}" ne contient aucune note.` }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook "${folderParsed.title}" has no notes.` }] };
         const notes = result.rows.map((row: any) => {
           const parsed = parseJoplinContent(row.content);
           const isTruncated = parsed.body.length > 100;
           return { id: row.id, title: parsed.title, preview: isTruncated ? parsed.body.substring(0, 100) : parsed.body, isTruncated, isDeleted: parsed.isDeleted, updated: formatTimestamp(row.updated_time) };
         }).filter((n: any) => !n.isDeleted);
-        if (notes.length === 0) return { content: [{ type: "text" as const, text: `Le carnet "${folderParsed.title}" ne contient aucune note.` }] };
-        const lines = notes.map((n: any) => `📝 **${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   ⚠️ CONTENU TRONQUÉ - Utilise get_note avec cet ID pour lire la note en entier" : ""}`);
-        return { content: [{ type: "text" as const, text: `📂 Carnet "${folderParsed.title}" - ${notes.length} note(s):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        if (notes.length === 0) return { content: [{ type: "text" as const, text: `Notebook "${folderParsed.title}" has no notes.` }] };
+        const lines = notes.map((n: any) => `**${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`);
+        return { content: [{ type: "text" as const, text: `Notebook "${folderParsed.title}" - ${notes.length} note(s):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -822,7 +822,7 @@ function createMcpServer(): McpServer {
         let parentJopId: string | undefined;
         if (notebook_id) {
           const nb = await findItem(notebook_id, JOP_TYPE_FOLDER, userId);
-          if (!nb) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' non trouvé.` }] };
+          if (!nb) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
           parentJopId = nb.jop_id;
         }
         const notes = await pool.query(
@@ -837,7 +837,7 @@ function createMcpServer(): McpServer {
             const json = parseRawJson(row.content);
             return {
               id: row.id,
-              title: String(json.title || "(sans titre)"),
+              title: String(json.title || "(untitled)"),
               isTodo: Number(json.is_todo || 0) === 1,
               deleted: Number(json.deleted_time || 0) > 0,
               due: Number(json.todo_due || 0),
@@ -858,16 +858,16 @@ function createMcpServer(): McpServer {
         });
         const shown = todos.slice(0, Math.min(limit, 200));
         if (shown.length === 0) {
-          const empty = status === "open" ? "Aucun todo à faire." : status === "done" ? "Aucun todo terminé." : "Aucun todo trouvé.";
+          const empty = status === "open" ? "No open todo." : status === "done" ? "No completed todo." : "No todo found.";
           return { content: [{ type: "text" as const, text: empty }] };
         }
         const lines = shown.map((t) => {
-          const parts = [t.due > 0 ? `échéance ${formatTimestamp(t.due)}` : "", t.completed > 0 ? `fait le ${formatTimestamp(t.completed)}` : ""].filter(Boolean);
-          return `${t.completed > 0 ? "☑️" : "☐"} **${t.title}**${parts.length ? ` · ${parts.join(" · ")}` : ""}\n   ID: ${t.id}${t.notebook ? ` · carnet: ${t.notebook}` : ""}`;
+          const parts = [t.due > 0 ? `due ${formatTimestamp(t.due)}` : "", t.completed > 0 ? `completed ${formatTimestamp(t.completed)}` : ""].filter(Boolean);
+          return `${t.completed > 0 ? "[x]" : "[ ]"} **${t.title}**${parts.length ? ` · ${parts.join(" · ")}` : ""}\n   ID: ${t.id}${t.notebook ? ` · notebook: ${t.notebook}` : ""}`;
         });
-        const header = status === "done" ? "faits" : status === "open" ? "à faire" : "tous";
-        return { content: [{ type: "text" as const, text: `☑️ Todos (${todos.length} ${header}, ${shown.length} affichés):\n\n${lines.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        const header = status === "done" ? "completed" : status === "open" ? "open" : "all";
+        return { content: [{ type: "text" as const, text: `Todos (${todos.length} ${header}, ${shown.length} shown):\n\n${lines.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -893,7 +893,7 @@ function createMcpServer(): McpServer {
             return { id: row.id, jopId: String(row.jop_id), parent: String(row.jop_parent_id || ""), title: parsed.title, deleted: parsed.isDeleted };
           })
           .filter((n) => !n.deleted);
-        if (nodes.length === 0) return { content: [{ type: "text" as const, text: "Aucun carnet." }] };
+        if (nodes.length === 0) return { content: [{ type: "text" as const, text: "No notebooks." }] };
         const byJop = new Map(nodes.map((n) => [n.jopId, n]));
         const children = new Map<string, typeof nodes>();
         const roots: typeof nodes = [];
@@ -908,14 +908,14 @@ function createMcpServer(): McpServer {
         const walk = (list: typeof nodes, depth: number) => {
           for (const node of [...list].sort((a, b) => a.title.localeCompare(b.title))) {
             const count = counts.get(node.jopId) || 0;
-            const branch = depth === 0 ? "📂" : `${"   ".repeat(depth - 1)}└─`;
-            lines.push(`${branch} ${node.title} · ${count} note(s) · ID: ${node.id}`);
+            const branch = depth === 0 ? "" : `${"   ".repeat(depth - 1)}└─ `;
+            lines.push(`${branch}${node.title} · ${count} note(s) · ID: ${node.id}`);
             walk(children.get(node.jopId) || [], depth + 1);
           }
         };
         walk(roots, 0);
-        return { content: [{ type: "text" as const, text: `🌳 Carnets (${nodes.length}):\n\n${lines.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Notebooks (${nodes.length}):\n\n${lines.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -948,12 +948,12 @@ function createMcpServer(): McpServer {
             };
           })
           .filter((n) => !n.deleted);
-        if (notes.length === 0) return { content: [{ type: "text" as const, text: "Aucune note en conflit." }] };
+        if (notes.length === 0) return { content: [{ type: "text" as const, text: "No note in conflict." }] };
         const lines = notes.map((n) =>
-          `⚠️ **${n.title}**\n   ID: ${n.id}${n.notebook ? ` · carnet: ${n.notebook}` : ""} · maj ${formatTimestamp(n.updated)}${n.originalId ? ` · original: ${n.originalId}` : ""}`
+          `**${n.title}**\n   ID: ${n.id}${n.notebook ? ` · notebook: ${n.notebook}` : ""} · updated ${formatTimestamp(n.updated)}${n.originalId ? ` · original: ${n.originalId}` : ""}`
         );
-        return { content: [{ type: "text" as const, text: `⚠️ Notes en conflit (${notes.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Notes in conflict (${notes.length}):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -966,7 +966,7 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
-        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const rows = await pool.query(
           `SELECT id, content, updated_time FROM items
            WHERE owner_id = $1 AND jop_type = $2 AND encode(content, 'escape') LIKE $3`,
@@ -986,10 +986,10 @@ function createMcpServer(): McpServer {
           .sort((a: any, b: any) => b.at - a.at)
           .slice(0, Math.min(limit, 100));
         if (entries.length === 0) {
-          return { content: [{ type: "text" as const, text: `Aucun historique serveur pour « ${parseJoplinContent(note.content).title} ».` }] };
+          return { content: [{ type: "text" as const, text: `No server history for "${parseJoplinContent(note.content).title}".` }] };
         }
         const blocks = entries.map((entry: any) => {
-          const lines: string[] = [`🕘 ${formatTimestamp(entry.at)}`];
+          const lines: string[] = [`${formatTimestamp(entry.at)}`];
           // metadata_diff is stored as a JSON string, the two other diffs as JSON arrays
           let meta: any = entry.metadata;
           if (typeof meta === "string") {
@@ -1002,27 +1002,27 @@ function createMcpServer(): McpServer {
             const isCreation = Boolean(added.id);
             const changed = Object.keys(added).filter((k) => !["user_created_time", "deleted_time"].includes(k));
             const removed = Array.isArray(meta.deleted) ? meta.deleted : [];
-            if (trashed) lines.push("   🗑️ mise à la corbeille");
+            if (trashed) lines.push("   moved to the trash");
             if (isCreation) {
-              lines.push("   📄 création (état initial de l'élément)");
+              lines.push("   creation (initial state of the item)");
             } else if (changed.length) {
-              lines.push(`   champs: ${changed.slice(0, 8).join(", ")}${changed.length > 8 ? ` … (${changed.length} au total)` : ""}`);
+              lines.push(`   fields: ${changed.slice(0, 8).join(", ")}${changed.length > 8 ? ` … (${changed.length} total)` : ""}`);
             }
-            if (removed.length) lines.push(`   supprimés: ${removed.join(", ")}`);
+            if (removed.length) lines.push(`   removed: ${removed.join(", ")}`);
           }
           const titleDiff = renderHistoryDiff(entry.title);
-          if (titleDiff.length) lines.push(`   titre: ${titleDiff.slice(0, 3).join(" | ")}`);
+          if (titleDiff.length) lines.push(`   title: ${titleDiff.slice(0, 3).join(" | ")}`);
           const bodyDiff = renderHistoryDiff(entry.body);
-          if (bodyDiff.length) lines.push(`   corps:\n${bodyDiff.slice(0, 6).map((l: string) => `     ${l}`).join("\n")}`);
+          if (bodyDiff.length) lines.push(`   body:\n${bodyDiff.slice(0, 6).map((l: string) => `     ${l}`).join("\n")}`);
           return lines.join("\n");
         });
         return {
           content: [{
             type: "text" as const,
-            text: `🕘 Historique de « ${parseJoplinContent(note.content).title} » (${entries.length} entrées):\n\n${blocks.join("\n\n")}`
+            text: `History of "${parseJoplinContent(note.content).title}" (${entries.length} entries):\n\n${blocks.join("\n\n")}`
           }]
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1047,7 +1047,7 @@ function createMcpServer(): McpServer {
         if (is_todo !== undefined) todoExtra.is_todo = is_todo ? 1 : 0;
         if (todo_due !== undefined) {
           const due = parseDueDate(todo_due);
-          if (due === null || Number.isNaN(due)) return { content: [{ type: "text" as const, text: `Erreur: échéance '${todo_due}' illisible (ISO 8601 ou epoch ms attendu).` }] };
+          if (due === null || Number.isNaN(due)) return { content: [{ type: "text" as const, text: `Error: due date '${todo_due}' cannot be parsed (ISO 8601 or epoch ms expected).` }], isError: true };
           todoExtra.todo_due = due;
           if (due > 0 && todoExtra.is_todo === undefined) todoExtra.is_todo = 1;
         }
@@ -1076,8 +1076,8 @@ function createMcpServer(): McpServer {
         await recordUserItem({ itemId: noteId, userId });
         // Record change so Joplin Server pushes it to synced clients
         await recordChange({ itemId: noteId, itemType: JOP_TYPE_NOTE, changeType: CHANGE_CREATED, jopId, userId });
-        return { content: [{ type: "text" as const, text: `✅ Note créée !\n📝 Titre: ${title}\n🆔 ID: ${noteId}\n📂 Carnet: ${parentJopId || "défaut"}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Note created: **${title}**\nID: ${noteId}\nNotebook: ${parentJopId || "default"}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1093,12 +1093,12 @@ function createMcpServer(): McpServer {
     async ({ note_id, title, body, is_todo, todo_due, todo_completed }) => {
       try {
         const hasTodoChange = is_todo !== undefined || todo_due !== undefined || todo_completed !== undefined;
-        if (!title && !body && !hasTodoChange) return { content: [{ type: "text" as const, text: "Erreur: fournis au moins un titre, un contenu ou un champ de todo à modifier." }] };
+        if (!title && !body && !hasTodoChange) return { content: [{ type: "text" as const, text: "Error: provide at least a title, a body or a todo field to update." }], isError: true };
         const result = await pool.query(
           `SELECT i.id, i.content, i.jop_parent_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
           [note_id, JOP_TYPE_NOTE]
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
         const newTitle = title || parsed.title;
@@ -1121,7 +1121,7 @@ function createMcpServer(): McpServer {
         }
         if (todo_due !== undefined) {
           const due = parseDueDate(todo_due);
-          if (due === undefined || Number.isNaN(due)) return { content: [{ type: "text" as const, text: `Erreur: échéance '${todo_due}' illisible (ISO 8601 ou epoch ms attendu).` }] };
+          if (due === undefined || Number.isNaN(due)) return { content: [{ type: "text" as const, text: `Error: due date '${todo_due}' cannot be parsed (ISO 8601 or epoch ms expected).` }], isError: true };
           extra.todo_due = due;
           if (due > 0 && extra.is_todo === undefined) extra.is_todo = 1;
         }
@@ -1142,13 +1142,13 @@ function createMcpServer(): McpServer {
         await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId: jopId, userId, changeItemType: 1 });
         const todoLine = (() => {
           if (!hasTodoChange) return "";
-          if (Number(extra.is_todo) !== 1) return "\n☑️ Todo désactivé (note simple)";
+          if (Number(extra.is_todo) !== 1) return "\nTodo disabled (plain note)";
           const due = Number(extra.todo_due || 0);
           const done = Number(extra.todo_completed || 0);
-          return `\n☑️ Todo · échéance: ${due > 0 ? formatTimestamp(due) : "aucune"} · ${done > 0 ? `fait le ${formatTimestamp(done)}` : "à faire"}`;
+          return `\nTodo · due: ${due > 0 ? formatTimestamp(due) : "none"} · ${done > 0 ? `completed ${formatTimestamp(done)}` : "open"}`;
         })();
-        return { content: [{ type: "text" as const, text: `✅ Note mise à jour !\n📝 Titre: ${newTitle}\n🆔 ID: ${note_id}${todoLine}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Note updated: **${newTitle}**\nID: ${note_id}${todoLine}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1160,7 +1160,7 @@ function createMcpServer(): McpServer {
           `SELECT i.id, i.content FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
           [note_id, JOP_TYPE_NOTE]
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
         const now = Date.now();
@@ -1181,8 +1181,8 @@ function createMcpServer(): McpServer {
         const jopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1`, [note_id]);
         const jopId = jopIdResult.rows.length > 0 ? jopIdResult.rows[0].jop_id : note_id;
         await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_DELETED, jopId, userId });
-        return { content: [{ type: "text" as const, text: `🗑️ Note supprimée !\n📝 Titre: ${parsed.title}\n🆔 ID: ${note_id}\n💡 La note est dans la corbeille Joplin.` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Note moved to the trash: **${parsed.title}**\nID: ${note_id}\nThe note sits in the Joplin trash.` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1195,10 +1195,10 @@ function createMcpServer(): McpServer {
       try {
         // Verify note exists
         const noteResult = await pool.query(`SELECT id, content FROM items WHERE id = $1 AND jop_type = $2`, [note_id, JOP_TYPE_NOTE]);
-        if (noteResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (noteResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         // Verify target notebook exists
         const folderResult = await pool.query(`SELECT id, content FROM items WHERE id = $1 AND jop_type = $2`, [target_notebook_id, JOP_TYPE_FOLDER]);
-        if (folderResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Carnet '${target_notebook_id}' non trouvé. Utilise list_notebooks pour voir les carnets.` }] };
+        if (folderResult.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook '${target_notebook_id}' not found. Use list_notebooks to see the notebooks.` }], isError: true };
         const noteParsed = parseJoplinContent(noteResult.rows[0].content);
         const folderParsed = parseJoplinContent(folderResult.rows[0].content);
         const now = Date.now();
@@ -1214,8 +1214,8 @@ function createMcpServer(): McpServer {
         const jopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1`, [note_id]);
         const jopId = jopIdResult.rows.length > 0 ? jopIdResult.rows[0].jop_id : note_id;
         await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId, userId, changeItemType: 1 });
-        return { content: [{ type: "text" as const, text: `📦 Note déplacée !\n📝 Note: ${noteParsed.title}\n📂 Vers: ${folderParsed.title}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Note moved: **${noteParsed.title}**\nTo notebook: ${folderParsed.title}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1257,7 +1257,7 @@ function createMcpServer(): McpServer {
             [parent_notebook_id, JOP_TYPE_FOLDER]
           );
           if (fr.rows.length === 0) {
-            return { content: [{ type: "text" as const, text: `Carnet parent '${parent_notebook_id}' introuvable. Utilise list_notebooks pour trouver l'ID du parent.` }] };
+            return { content: [{ type: "text" as const, text: `Parent notebook '${parent_notebook_id}' not found. Use list_notebooks to find the parent id.` }], isError: true };
           }
           parentJopId = fr.rows[0].jop_id;
         }
@@ -1270,8 +1270,8 @@ function createMcpServer(): McpServer {
         await recordUserItem({ itemId: folderId, userId });
         // Record change so Joplin Server pushes the new notebook to synced clients
         await recordChange({ itemId: folderId, itemType: JOP_TYPE_FOLDER, changeType: CHANGE_CREATED, jopId, userId });
-        return { content: [{ type: "text" as const, text: `✅ Carnet créé !\n📂 Titre: ${title}${icon ? `\n🎨 Icône: ${icon.emoji}` : ""}\n🆔 ID: ${folderId}${parentJopId ? `\n📁 Sous-carnet de: ${parent_notebook_id}` : ""}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Notebook created: **${title}**${icon ? `\nIcon: ${icon.emoji}` : ""}\nID: ${folderId}${parentJopId ? `\nSub-notebook of: ${parent_notebook_id}` : ""}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1288,17 +1288,17 @@ function createMcpServer(): McpServer {
     async ({ notebook_id, title, icon }) => {
       try {
         if (title === undefined && icon === undefined) {
-          return { content: [{ type: "text" as const, text: "Erreur: fournis au moins un titre ou une icône à modifier." }] };
+          return { content: [{ type: "text" as const, text: "Error: provide at least a title or an icon to update." }], isError: true };
         }
         const userId = await getUserId();
         const result = await pool.query(
           `SELECT i.id, i.content, i.jop_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
           [notebook_id, JOP_TYPE_FOLDER]
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' non trouvé.` }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
-        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' est dans la corbeille.` }] };
+        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' is in the trash.` }], isError: true };
         const now = Date.now();
         // Preserve all existing fields; only change the title and/or the icon when provided
         const json: Record<string, any> = { ...parseRawJson(row.content), user_updated_time: now };
@@ -1311,10 +1311,10 @@ function createMcpServer(): McpServer {
         );
         await recordChange({ itemId: notebook_id, itemType: JOP_TYPE_FOLDER, changeType: CHANGE_UPDATED, jopId: row.jop_id, userId });
         const changes: string[] = [];
-        if (title !== undefined) changes.push(`📂 ${parsed.title} → ${title}`);
-        if (icon !== undefined) changes.push(`🎨 Icône: ${icon.emoji}`);
-        return { content: [{ type: "text" as const, text: `✅ Carnet mis à jour !\n${changes.join("\n")}\n🆔 ID: ${notebook_id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        if (title !== undefined) changes.push(`Title: ${parsed.title} → ${title}`);
+        if (icon !== undefined) changes.push(`Icon: ${icon.emoji}`);
+        return { content: [{ type: "text" as const, text: `Notebook updated:\n${changes.join("\n")}\nID: ${notebook_id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1327,9 +1327,9 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const row = await findItem(notebook_id, JOP_TYPE_FOLDER, userId);
-        if (!row) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' non trouvé.` }] };
+        if (!row) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
         const parsed = parseJoplinContent(row.content);
-        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Le carnet « ${parsed.title} » est dans la corbeille.` }] };
+        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Notebook "${parsed.title}" is in the trash.` }], isError: true };
         const targetId = parent_id.trim();
         let targetJopId = "";
         let targetTitle = "";
@@ -1348,8 +1348,8 @@ function createMcpServer(): McpServer {
           .filter((f) => !f.deleted);
         if (targetId) {
           const target = alive.find((f) => f.id === targetId || f.jopId === targetId);
-          if (!target) return { content: [{ type: "text" as const, text: `Carnet cible '${targetId}' non trouvé.` }] };
-          if (target.jopId === row.jop_id) return { content: [{ type: "text" as const, text: "Un carnet ne peut pas être son propre parent." }] };
+          if (!target) return { content: [{ type: "text" as const, text: `Target notebook '${targetId}' not found.` }], isError: true };
+          if (target.jopId === row.jop_id) return { content: [{ type: "text" as const, text: "A notebook cannot be its own parent." }], isError: true };
           // Walk down from the moved notebook: the target must not be one of its descendants
           const childrenOf = new Map<string, typeof alive>();
           for (const f of alive) {
@@ -1368,7 +1368,7 @@ function createMcpServer(): McpServer {
             }
           }
           if (seen.has(target.jopId)) {
-            return { content: [{ type: "text" as const, text: `Déplacement impossible : « ${target.title} » est un sous-carnet de « ${parsed.title} » (cycle).` }] };
+            return { content: [{ type: "text" as const, text: `Cannot move: "${target.title}" is a sub-notebook of "${parsed.title}" (cycle).` }], isError: true };
           }
           targetJopId = target.jopId;
           targetTitle = target.title;
@@ -1383,10 +1383,10 @@ function createMcpServer(): McpServer {
         return {
           content: [{
             type: "text" as const,
-            text: `✅ Carnet déplacé !\n📂 ${parsed.title} → ${targetTitle || "racine"}\n🆔 ID: ${row.id}`
+            text: `Notebook moved: **${parsed.title}**\nTo: ${targetTitle || "root"}\nID: ${row.id}`
           }]
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1399,10 +1399,10 @@ function createMcpServer(): McpServer {
           `SELECT i.id, i.content, i.jop_id FROM items i WHERE i.id = $1 AND i.jop_type = $2`,
           [notebook_id, JOP_TYPE_FOLDER]
         );
-        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' non trouvé.` }] };
+        if (result.rows.length === 0) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' not found.` }], isError: true };
         const row: any = result.rows[0];
         const parsed = parseJoplinContent(row.content);
-        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Carnet '${notebook_id}' est déjà dans la corbeille.` }] };
+        if (parsed.isDeleted) return { content: [{ type: "text" as const, text: `Notebook '${notebook_id}' is already in the trash.` }], isError: true };
         // Safety: refuse if the notebook is not empty (notes or sub-notebooks still inside)
         const children = await pool.query(
           `SELECT id, content FROM items WHERE jop_parent_id = $1 AND owner_id = $2`,
@@ -1410,7 +1410,7 @@ function createMcpServer(): McpServer {
         );
         const alive = children.rows.filter((c: any) => !parseJoplinContent(c.content).isDeleted);
         if (alive.length > 0) {
-          return { content: [{ type: "text" as const, text: `⚠️ Le carnet "${parsed.title}" n'est pas vide (${alive.length} élément(s)). Déplace ou supprime d'abord ses notes et sous-carnets.` }] };
+          return { content: [{ type: "text" as const, text: `Notebook "${parsed.title}" is not empty (${alive.length} item(s)). Move or delete its notes and sub-notebooks first.` }], isError: true };
         }
         const now = Date.now();
         // Soft delete: set deleted_time, preserving all other fields (incl. the 'icon' string)
@@ -1421,8 +1421,8 @@ function createMcpServer(): McpServer {
           [contentBytes, contentBytes.length, now, now, notebook_id]
         );
         await recordChange({ itemId: notebook_id, itemType: JOP_TYPE_FOLDER, changeType: CHANGE_DELETED, jopId: row.jop_id, userId });
-        return { content: [{ type: "text" as const, text: `🗑️ Carnet supprimé !\n📂 Titre: ${parsed.title}\n🆔 ID: ${notebook_id}\n💡 Le carnet est dans la corbeille Joplin.` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Notebook moved to the trash: **${parsed.title}**\nID: ${notebook_id}\nThe notebook sits in the Joplin trash.` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1437,9 +1437,9 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
-        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const resourceJopIds = await listNoteResourceIds(note);
-        if (resourceJopIds.length === 0) return { content: [{ type: "text" as const, text: `La note '${note_id}' n'a aucune pièce jointe.` }] };
+        if (resourceJopIds.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' has no attachment.` }] };
         const rows = await pool.query(
           `SELECT id, name, content, jop_id, jop_parent_id, jop_type, content_size, updated_time
            FROM items WHERE owner_id = $1 AND jop_type = $2 AND jop_id = ANY($3::text[])
@@ -1447,10 +1447,10 @@ function createMcpServer(): McpServer {
           [userId, JOP_TYPE_RESOURCE, Array.from(resourceJopIds), Math.min(limit, 200)]
         );
         const resources = (rows.rows as JoplinItemRow[]).map(resourceSummary).filter((r) => !r.isDeleted);
-        if (resources.length === 0) return { content: [{ type: "text" as const, text: `La note '${note_id}' n'a aucune pièce jointe disponible.` }] };
-        const lines = resources.map((r) => `📎 **${r.title}** (ID: ${r.id})\n   jop_id: ${r.jopId} · ${formatBytes(r.size)} · ${r.mime}\n   Mis à jour: ${r.updated}`);
-        return { content: [{ type: "text" as const, text: `📎 Pièces jointes (${resources.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        if (resources.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' has no available attachment.` }] };
+        const lines = resources.map((r) => `**${r.title}** (ID: ${r.id})\n   jop_id: ${r.jopId} · ${formatBytes(r.size)} · ${r.mime}\n   Updated: ${r.updated}`);
+        return { content: [{ type: "text" as const, text: `Attachments (${resources.length}):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1476,10 +1476,10 @@ function createMcpServer(): McpServer {
           params
         );
         const resources = (rows.rows as JoplinItemRow[]).map(resourceSummary).filter((r) => !r.isDeleted);
-        if (resources.length === 0) return { content: [{ type: "text" as const, text: "Aucune pièce jointe trouvée." }] };
-        const lines = resources.map((r) => `📎 **${r.title}** (ID: ${r.id})\n   ${formatBytes(r.size)} · ${r.mime} · ${r.updated}`);
-        return { content: [{ type: "text" as const, text: `📎 Pièces jointes récentes (${resources.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        if (resources.length === 0) return { content: [{ type: "text" as const, text: "No attachment found." }] };
+        const lines = resources.map((r) => `**${r.title}** (ID: ${r.id})\n   ${formatBytes(r.size)} · ${r.mime} · ${r.updated}`);
+        return { content: [{ type: "text" as const, text: `Recent attachments (${resources.length}):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1489,23 +1489,23 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
-        if (!row) return { content: [{ type: "text" as const, text: `Ressource '${resource_id}' non trouvée.` }] };
+        if (!row) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(row);
         const blob = await findResourceBlob(row.jop_id, userId);
         const usage = await pool.query(`SELECT item_id FROM item_resources WHERE resource_id = $1`, [row.jop_id]);
         const text = [
-          `${summary.isDeleted ? "🗑️" : "📎"} **${summary.title}**`,
-          `🆔 ID: ${summary.id}`,
-          `🔑 jop_id: ${summary.jopId}`,
-          `📦 Taille: ${formatBytes(summary.size)}`,
-          `🏷️ Type: ${summary.mime}${summary.fileExtension ? ` (.${summary.fileExtension})` : ""}`,
-          `🕐 Mis à jour: ${summary.updated}`,
-          `💾 Blob: ${blob ? `${formatBytes(blob.content_size)} stockés` : "absent"}`,
-          `🔗 Référencée par ${usage.rows.length} note(s)`,
-          `⬇️ Téléchargement: ${MCP_PUBLIC_URL}/files/${summary.id} (en-tête Authorization: Bearer <clé MCP>)`
+          `${summary.isDeleted ? "[trashed] " : ""}**${summary.title}**`,
+          `ID: ${summary.id}`,
+          `jop_id: ${summary.jopId}`,
+          `Size: ${formatBytes(summary.size)}`,
+          `Type: ${summary.mime}${summary.fileExtension ? ` (.${summary.fileExtension})` : ""}`,
+          `Updated: ${summary.updated}`,
+          `Blob: ${blob ? `${formatBytes(blob.content_size)} stored` : "missing"}`,
+          `Referenced by ${usage.rows.length} note(s)`,
+          `Download: ${MCP_PUBLIC_URL}/files/${summary.id} (Authorization: Bearer <MCP key> header)`
         ].join("\n");
         return { content: [{ type: "text" as const, text }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1518,25 +1518,26 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
-        if (!row) return { content: [{ type: "text" as const, text: `Ressource '${resource_id}' non trouvée.` }] };
+        if (!row) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(row);
-        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Ressource '${resource_id}' est dans la corbeille.` }] };
+        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' is in the trash.` }], isError: true };
         const blob = await findResourceBlob(row.jop_id, userId);
-        if (!blob) return { content: [{ type: "text" as const, text: `Aucun contenu binaire pour la ressource '${resource_id}' (${summary.title}).` }] };
+        if (!blob) return { content: [{ type: "text" as const, text: `No binary content for resource '${resource_id}' (${summary.title}).` }] };
         const cap = Math.min(max_bytes ?? DEFAULT_INLINE_DOWNLOAD_MAX_BYTES, HARD_INLINE_DOWNLOAD_MAX_BYTES);
         if (blob.content.length > cap) {
           return {
             content: [{
               type: "text" as const,
-              text: `⚠️ Fichier trop volumineux pour un retour inline (${formatBytes(blob.content.length)} > ${formatBytes(cap)}).\n` +
-                `Utilise l'endpoint binaire :\n` +
+              text: `File too large for an inline reply (${formatBytes(blob.content.length)} > ${formatBytes(cap)}).\n` +
+                `Use the binary endpoint:\n` +
                 `curl -fsSL -H "Authorization: Bearer $JOPLIN_API_KEY" "${MCP_PUBLIC_URL}/files/${summary.id}" -o "${summary.title}"`
-            }]
+            }],
+            isError: true
           };
         }
-        const header = `📎 ${summary.title}\n🆔 ID: ${summary.id} · jop_id: ${summary.jopId}\n🏷️ ${summary.mime} · ${formatBytes(blob.content.length)}\nBase64 (${summary.fileExtension || "bin"}):`;
+        const header = `**${summary.title}**\nID: ${summary.id} · jop_id: ${summary.jopId}\n${summary.mime} · ${formatBytes(blob.content.length)}\nBase64 (${summary.fileExtension || "bin"}):`;
         return { content: [{ type: "text" as const, text: `${header}\n${blob.content.toString("base64")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1553,28 +1554,28 @@ function createMcpServer(): McpServer {
         const userId = await getUserId();
         const cleaned = data_base64.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
         const data = Buffer.from(cleaned, "base64");
-        if (data.length === 0) return { content: [{ type: "text" as const, text: "Erreur: contenu base64 vide ou invalide." }] };
+        if (data.length === 0) return { content: [{ type: "text" as const, text: "Error: empty or invalid base64 content." }], isError: true };
         if (data.length > HARD_INLINE_DOWNLOAD_MAX_BYTES) {
-          return { content: [{ type: "text" as const, text: `⚠️ Fichier trop volumineux pour un ajout inline (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Utilise POST /files.` }] };
+          return { content: [{ type: "text" as const, text: `File too large for an inline upload (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Use POST /files.` }], isError: true };
         }
         let note: JoplinItemRow | null = null;
         if (note_id) {
           note = await findItem(note_id, JOP_TYPE_NOTE, userId);
-          if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+          if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         }
         const resource = await createResource({ title: filename, data, mime: mime_type, userId });
         let attachNote = "";
         if (note) {
           await appendResourceLinkToNote(note, resource.title, resource.jopId, as_image === true);
-          attachNote = `\n📝 Liée à la note: ${note.id}`;
+          attachNote = `\nAttached to note: ${note.id}`;
         }
         return {
           content: [{
             type: "text" as const,
-            text: `✅ Pièce jointe créée !\n📎 ${resource.title}\n🆔 ID: ${resource.id}\n🔑 jop_id: ${resource.jopId}\n📦 ${formatBytes(resource.size)} · ${resource.mime}${attachNote}`
+            text: `Attachment created: **${resource.title}**\nID: ${resource.id}\njop_id: ${resource.jopId}\n${formatBytes(resource.size)} · ${resource.mime}${attachNote}`
           }]
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1589,14 +1590,14 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
-        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const resource = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
-        if (!resource) return { content: [{ type: "text" as const, text: `Ressource '${resource_id}' non trouvée.` }] };
+        if (!resource) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(resource);
-        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Ressource '${resource_id}' est dans la corbeille.` }] };
+        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' is in the trash.` }], isError: true };
         await appendResourceLinkToNote(note, label || summary.title, resource.jop_id, as_image === true);
-        return { content: [{ type: "text" as const, text: `✅ Pièce jointe liée !\n📎 ${summary.title}\n📝 Note: ${note.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Attachment linked: **${summary.title}**\nNote: ${note.id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1609,20 +1610,20 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
-        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const resource = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
-        if (!resource) return { content: [{ type: "text" as const, text: `Ressource '${resource_id}' non trouvée.` }] };
+        if (!resource) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' not found.` }], isError: true };
         const removed = await removeResourceLinksFromNote(note, resource.jop_id);
         const summary = resourceSummary(resource);
         return {
           content: [{
             type: "text" as const,
             text: removed > 0
-              ? `✅ Lien retiré (${removed} occurrence(s)) !\n📎 ${summary.title}\n📝 Note: ${note.id}\n💡 La ressource existe toujours dans Joplin.`
-              : `Aucun lien vers '${summary.title}' dans la note ${note.id}.`
+              ? `Link removed (${removed} occurrence(s)).\nAttachment: ${summary.title}\nNote: ${note.id}\nThe resource still exists in Joplin.`
+              : `No link to '${summary.title}' in note ${note.id}.`
           }]
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1635,9 +1636,9 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
-        if (!row) return { content: [{ type: "text" as const, text: `Ressource '${resource_id}' non trouvée.` }] };
+        if (!row) return { content: [{ type: "text" as const, text: `Resource '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(row);
-        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Ressource '${summary.title}' est déjà dans la corbeille.` }] };
+        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `Resource '${summary.title}' is already in the trash.` }], isError: true };
         const refs = await pool.query(`SELECT item_id FROM item_resources WHERE resource_id = $1`, [row.jop_id]);
         if (refs.rows.length > 0 && force !== true) {
           const noteRows = await pool.query(`SELECT id, content FROM items WHERE id = ANY($1::text[])`, [refs.rows.map((r: any) => r.item_id)]);
@@ -1645,9 +1646,10 @@ function createMcpServer(): McpServer {
           return {
             content: [{
               type: "text" as const,
-              text: `⚠️ Ressource '${summary.title}' encore référencée par ${refs.rows.length} note(s) : ${titles.join(", ")}.\n` +
-                `Fais d'abord unlink_resource_from_note, ou relance avec force=true.`
-            }]
+              text: `Resource '${summary.title}' is still referenced by ${refs.rows.length} note(s): ${titles.join(", ")}.\n` +
+                `Run unlink_resource_from_note first, or retry with force=true.`
+            }],
+            isError: true
           };
         }
         const now = Date.now();
@@ -1658,14 +1660,14 @@ function createMcpServer(): McpServer {
           [contentBytes, contentBytes.length, now, row.id]
         );
         await recordChange({ itemId: row.id, itemType: JOP_TYPE_RESOURCE, changeType: CHANGE_DELETED, jopId: row.jop_id, userId, changeItemType: 2 });
-        const linksNote = refs.rows.length > 0 ? `\n💡 ${refs.rows.length} lien(s) restent dans les corps de notes (rendu = pièce manquante).` : "";
+        const linksNote = refs.rows.length > 0 ? `\n${refs.rows.length} link(s) remain in note bodies (they render as a missing attachment).` : "";
         return {
           content: [{
             type: "text" as const,
-            text: `🗑️ Pièce jointe mise à la corbeille !\n📎 ${summary.title}\n🆔 ID: ${summary.id}\n💡 Le binaire reste sur le serveur jusqu'à la purge de la corbeille.${linksNote}`
+            text: `Attachment moved to the trash: **${summary.title}**\nID: ${summary.id}\nThe binary stays on the server until the trash is purged.${linksNote}`
           }]
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1680,23 +1682,23 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const row = await findItem(resource_id, JOP_TYPE_RESOURCE, userId);
-        if (!row) return { content: [{ type: "text" as const, text: `Pièce jointe '${resource_id}' non trouvée.` }] };
+        if (!row) return { content: [{ type: "text" as const, text: `Attachment '${resource_id}' not found.` }], isError: true };
         const summary = resourceSummary(row);
-        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `« ${summary.title} » est dans la corbeille : restaure-la avec restore_item avant de remplacer son contenu.` }] };
+        if (summary.isDeleted) return { content: [{ type: "text" as const, text: `"${summary.title}" is in the trash: restore it with restore_item before replacing its content.` }], isError: true };
         const cleaned = data_base64.replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
         const data = Buffer.from(cleaned, "base64");
-        if (data.length === 0) return { content: [{ type: "text" as const, text: "Erreur: contenu base64 vide ou invalide." }] };
+        if (data.length === 0) return { content: [{ type: "text" as const, text: "Error: empty or invalid base64 content." }], isError: true };
         if (data.length > HARD_INLINE_DOWNLOAD_MAX_BYTES) {
-          return { content: [{ type: "text" as const, text: `⚠️ Fichier trop volumineux pour un remplacement inline (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Utilise PUT /files/${summary.id}.` }] };
+          return { content: [{ type: "text" as const, text: `File too large for an inline replacement (${formatBytes(data.length)} > ${formatBytes(HARD_INLINE_DOWNLOAD_MAX_BYTES)}). Use PUT /files/${summary.id}.` }], isError: true };
         }
         const result = await replaceResourceContent({ resource: row, data, mime: mime_type, filename, userId });
         return {
           content: [{
             type: "text" as const,
-            text: `✅ Contenu remplacé !\n📎 ${result.title}\n🆔 ID: ${result.id}\n🔑 jop_id: ${result.jopId} (inchangé — les liens des notes restent valides)\n📦 ${formatBytes(result.sizeBefore)} → ${formatBytes(result.size)} · ${result.mime}`
+            text: `Content replaced: **${result.title}**\nID: ${result.id}\njop_id: ${result.jopId} (unchanged, so note links stay valid)\n${formatBytes(result.sizeBefore)} → ${formatBytes(result.size)} · ${result.mime}`
           }]
         };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1723,19 +1725,19 @@ function createMcpServer(): McpServer {
             return {
               id: row.id,
               jopId: row.jop_id,
-              type: row.jop_type === JOP_TYPE_NOTE ? "note" : "ressource",
-              title: String(json.title || "(sans titre)"),
+              type: row.jop_type === JOP_TYPE_NOTE ? "note" : "resource",
+              title: String(json.title || "(untitled)"),
               deletedAt: formatTimestamp(Number(json.deleted_time || 0)),
               size: Number(json.size || 0)
             };
           })
           .filter((i) => i.deletedAt !== "N/A");
-        if (items.length === 0) return { content: [{ type: "text" as const, text: "La corbeille est vide." }] };
+        if (items.length === 0) return { content: [{ type: "text" as const, text: "The trash is empty." }] };
         const lines = items.map((i) =>
-          `🗑️ **${i.title}** (${i.type})\n   ID: ${i.id} · jop_id: ${i.jopId} · supprimé le ${i.deletedAt}${i.type === "ressource" ? ` · ${formatBytes(i.size)}` : ""}`
+          `**${i.title}** (${i.type})\n   ID: ${i.id} · jop_id: ${i.jopId} · deleted ${i.deletedAt}${i.type === "resource" ? ` · ${formatBytes(i.size)}` : ""}`
         );
-        return { content: [{ type: "text" as const, text: `🗑️ Corbeille (${items.length}):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Trash (${items.length}):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1745,11 +1747,11 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const row = (await findItem(item_id, JOP_TYPE_NOTE, userId)) || (await findItem(item_id, JOP_TYPE_RESOURCE, userId));
-        if (!row) return { content: [{ type: "text" as const, text: `Élément '${item_id}' non trouvé (ni note ni ressource).` }] };
+        if (!row) return { content: [{ type: "text" as const, text: `Item '${item_id}' not found (neither a note nor a resource).` }], isError: true };
         const json = parseRawJson(row.content);
-        const title = String(json.title || "(sans titre)");
+        const title = String(json.title || "(untitled)");
         if (!(Number(json.deleted_time || 0) > 0)) {
-          return { content: [{ type: "text" as const, text: `« ${title} » n'est pas dans la corbeille.` }] };
+          return { content: [{ type: "text" as const, text: `"${title}" is not in the trash.` }], isError: true };
         }
         const now = Date.now();
         const contentBytes = Buffer.from(JSON.stringify({ ...json, deleted_time: 0, user_updated_time: now }), "utf-8");
@@ -1758,9 +1760,9 @@ function createMcpServer(): McpServer {
           [contentBytes, contentBytes.length, now, row.id]
         );
         await recordChange({ itemId: row.id, itemType: row.jop_type, changeType: CHANGE_UPDATED, jopId: row.jop_id, userId, changeItemType: 1 });
-        const kindLabel = row.jop_type === JOP_TYPE_NOTE ? "Note" : "Pièce jointe";
-        return { content: [{ type: "text" as const, text: `♻️ ${kindLabel} restaurée !\n📄 ${title}\n🆔 ID: ${row.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        const kindLabel = row.jop_type === JOP_TYPE_NOTE ? "Note" : "Attachment";
+        return { content: [{ type: "text" as const, text: `${kindLabel} restored: **${title}**\nID: ${row.id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1788,10 +1790,10 @@ function createMcpServer(): McpServer {
           .filter((row) => !(parseJoplinContent(row.content).isDeleted))
           .map((row) => ({ id: row.id, jopId: row.jop_id, title: parseJoplinContent(row.content).title, count: counts.get(row.jop_id) || 0 }))
           .sort((a, b) => a.title.localeCompare(b.title));
-        if (alive.length === 0) return { content: [{ type: "text" as const, text: "Aucun tag trouvé." }] };
-        const lines = alive.map((t) => `🏷️ **${t.title}** (ID: ${t.id}) - ${t.count} note(s)`);
-        return { content: [{ type: "text" as const, text: `🏷️ Tags (${alive.length}):\n\n${lines.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        if (alive.length === 0) return { content: [{ type: "text" as const, text: "No tags found." }] };
+        const lines = alive.map((t) => `**${t.title}** (ID: ${t.id}) - ${t.count} note(s)`);
+        return { content: [{ type: "text" as const, text: `Tags (${alive.length}):\n\n${lines.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1801,13 +1803,13 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const trimmed = title.trim();
-        if (!trimmed) return { content: [{ type: "text" as const, text: "Erreur: le titre du tag est vide." }] };
+        if (!trimmed) return { content: [{ type: "text" as const, text: "Error: the tag title is empty." }] };
         const existing = await pool.query(
           `SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2 AND encode(content, 'escape') ILIKE $3`,
           [userId, JOP_TYPE_TAG, `%${trimmed}%`]
         );
         const duplicate = existing.rows.find((row: any) => parseJoplinContent(row.content).title === trimmed && !parseJoplinContent(row.content).isDeleted);
-        if (duplicate) return { content: [{ type: "text" as const, text: `🏷️ Le tag "${trimmed}" existe déjà (ID: ${duplicate.id}).` }] };
+        if (duplicate) return { content: [{ type: "text" as const, text: `Tag "${trimmed}" already exists (ID: ${duplicate.id}).` }], isError: true };
         const tagId = generateId();
         const jopId = generateJopId();
         const now = Date.now();
@@ -1819,8 +1821,8 @@ function createMcpServer(): McpServer {
         );
         await recordUserItem({ itemId: tagId, userId });
         await recordChange({ itemId: tagId, itemType: JOP_TYPE_TAG, changeType: CHANGE_CREATED, jopId, userId, changeItemType: 2 });
-        return { content: [{ type: "text" as const, text: `✅ Tag créé !\n🏷️ ${trimmed}\n🆔 ID: ${tagId}\n🔑 jop_id: ${jopId}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Tag created: **${trimmed}**\nID: ${tagId}\njop_id: ${jopId}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1830,13 +1832,13 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
-        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const relations = await pool.query(`SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
         const tagJopIds = relations.rows
           .map((row: any) => ({ row, json: parseRawJson(row.content) }))
           .filter(({ json }: any) => json.note_id === note.jop_id && Number(json.deleted_time || 0) === 0)
           .map(({ json }: any) => String(json.tag_id));
-        if (tagJopIds.length === 0) return { content: [{ type: "text" as const, text: `La note '${note_id}' n'a aucun tag.` }] };
+        if (tagJopIds.length === 0) return { content: [{ type: "text" as const, text: `Note '${note_id}' has no tag.` }] };
         const tags = await pool.query(
           `SELECT id, name, content, jop_id, jop_parent_id, jop_type, content_size, updated_time
            FROM items WHERE owner_id = $1 AND jop_type = $2 AND jop_id = ANY($3::text[])`,
@@ -1846,9 +1848,9 @@ function createMcpServer(): McpServer {
           .map((row) => ({ id: row.id, title: parseJoplinContent(row.content).title }))
           .filter((t) => t.title)
           .sort((a, b) => a.title.localeCompare(b.title));
-        const lines = tagsList.map((t) => `🏷️ **${t.title}** (ID: ${t.id})`);
-        return { content: [{ type: "text" as const, text: `🏷️ Tags de la note (${tagsList.length}):\n\n${lines.join("\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        const lines = tagsList.map((t) => `**${t.title}** (ID: ${t.id})`);
+        return { content: [{ type: "text" as const, text: `Tags on the note (${tagsList.length}):\n\n${lines.join("\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1861,16 +1863,16 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
-        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
-        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' non trouvé.` }] };
+        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
         const relations = await pool.query(`SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
         const already = relations.rows.some((row: any) => {
           const json = parseRawJson(row.content);
           return String(json.tag_id || "") === tag.jop_id && String(json.note_id || "") === note.jop_id && Number(json.deleted_time || 0) === 0;
         });
         if (already) {
-          return { content: [{ type: "text" as const, text: `🏷️ Le tag "${parseJoplinContent(tag.content).title}" est déjà assigné à la note ${note.id}.` }] };
+          return { content: [{ type: "text" as const, text: `Tag "${parseJoplinContent(tag.content).title}" is already assigned to note ${note.id}.` }] };
         }
         const relId = generateId();
         const jopId = generateJopId();
@@ -1883,8 +1885,8 @@ function createMcpServer(): McpServer {
         );
         await recordUserItem({ itemId: relId, userId });
         await recordChange({ itemId: relId, itemType: JOP_TYPE_NOTE_TAG, changeType: CHANGE_CREATED, jopId, userId, changeItemType: 2 });
-        return { content: [{ type: "text" as const, text: `✅ Tag assigné !\n🏷️ ${parseJoplinContent(tag.content).title}\n📝 Note: ${note.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Tag assigned: **${parseJoplinContent(tag.content).title}**\nNote: ${note.id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1897,16 +1899,16 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const note = await findItem(note_id, JOP_TYPE_NOTE, userId);
-        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' non trouvée.` }] };
+        if (!note) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
-        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' non trouvé.` }] };
+        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
         const relations = await pool.query(`SELECT id, content, jop_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
         const matches = relations.rows.filter((row: any) => {
           const json = parseRawJson(row.content);
           return String(json.tag_id || "") === tag.jop_id && String(json.note_id || "") === note.jop_id && Number(json.deleted_time || 0) === 0;
         });
         if (matches.length === 0) {
-          return { content: [{ type: "text" as const, text: `Le tag "${parseJoplinContent(tag.content).title}" n'est pas assigné à la note ${note.id}.` }] };
+          return { content: [{ type: "text" as const, text: `Tag "${parseJoplinContent(tag.content).title}" is not assigned to note ${note.id}.` }] };
         }
         const now = Date.now();
         for (const rel of matches) {
@@ -1918,8 +1920,8 @@ function createMcpServer(): McpServer {
           );
           await recordChange({ itemId: rel.id, itemType: JOP_TYPE_NOTE_TAG, changeType: CHANGE_DELETED, jopId: rel.jop_id, userId, changeItemType: 2 });
         }
-        return { content: [{ type: "text" as const, text: `✅ Tag retiré !\n🏷️ ${parseJoplinContent(tag.content).title}\n📝 Note: ${note.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Tag removed: **${parseJoplinContent(tag.content).title}**\nNote: ${note.id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1932,15 +1934,15 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
-        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' non trouvé.` }] };
+        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
         const tagTitle = parseJoplinContent(tag.content).title;
-        if (parseJoplinContent(tag.content).isDeleted) return { content: [{ type: "text" as const, text: `Le tag "${tagTitle}" est dans la corbeille.` }] };
+        if (parseJoplinContent(tag.content).isDeleted) return { content: [{ type: "text" as const, text: `Tag "${tagTitle}" is in the trash.` }], isError: true };
         const relations = await pool.query(`SELECT content FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
         const noteJopIds = relations.rows
           .map((row: any) => parseRawJson(row.content))
           .filter((json: any) => String(json.tag_id || "") === tag.jop_id && Number(json.deleted_time || 0) === 0)
           .map((json: any) => String(json.note_id || ""));
-        if (noteJopIds.length === 0) return { content: [{ type: "text" as const, text: `Le tag "${tagTitle}" n'est assigné à aucune note.` }] };
+        if (noteJopIds.length === 0) return { content: [{ type: "text" as const, text: `Tag "${tagTitle}" is assigned to no note.` }] };
         const notes = await pool.query(
           `SELECT id, content, jop_id, jop_parent_id, updated_time FROM items
            WHERE owner_id = $1 AND jop_type = $2 AND jop_id = ANY($3::text[])`,
@@ -1959,11 +1961,11 @@ function createMcpServer(): McpServer {
           }))
           .filter((n) => !n.deleted)
           .sort((a, b) => b.updated - a.updated);
-        if (alive.length === 0) return { content: [{ type: "text" as const, text: `Le tag "${tagTitle}" n'est assigné à aucune note active.` }] };
+        if (alive.length === 0) return { content: [{ type: "text" as const, text: `Tag "${tagTitle}" is assigned to no live note.` }] };
         const shown = alive.slice(0, Math.min(limit, 200));
-        const lines = shown.map((n) => `📝 **${n.title}**\n   ID: ${n.id}${n.notebook ? ` · carnet: ${n.notebook}` : ""} · maj ${formatTimestamp(n.updated)}`);
-        return { content: [{ type: "text" as const, text: `🏷️ Notes avec le tag "${tagTitle}" (${alive.length}, ${shown.length} affichées):\n\n${lines.join("\n\n")}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        const lines = shown.map((n) => `**${n.title}**\n   ID: ${n.id}${n.notebook ? ` · notebook: ${n.notebook}` : ""} · updated ${formatTimestamp(n.updated)}`);
+        return { content: [{ type: "text" as const, text: `Notes with tag "${tagTitle}" (${alive.length}, ${shown.length} shown):\n\n${lines.join("\n\n")}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -1976,12 +1978,12 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
-        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' non trouvé.` }] };
+        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
         const current = parseJoplinContent(tag.content);
-        if (current.isDeleted) return { content: [{ type: "text" as const, text: `Le tag "${current.title}" est dans la corbeille.` }] };
+        if (current.isDeleted) return { content: [{ type: "text" as const, text: `Tag "${current.title}" is in the trash.` }], isError: true };
         const trimmed = title.trim();
-        if (!trimmed) return { content: [{ type: "text" as const, text: "Erreur: le nouveau titre est vide." }] };
-        if (trimmed === current.title) return { content: [{ type: "text" as const, text: `Le tag s'appelle déjà "${trimmed}" (ID: ${tag.id}).` }] };
+        if (!trimmed) return { content: [{ type: "text" as const, text: "Error: the new title is empty." }] };
+        if (trimmed === current.title) return { content: [{ type: "text" as const, text: `The tag is already called "${trimmed}" (ID: ${tag.id}).` }] };
         const others = await pool.query(
           `SELECT id, content FROM items WHERE owner_id = $1 AND jop_type = $2 AND id <> $3`,
           [userId, JOP_TYPE_TAG, tag.id]
@@ -1991,7 +1993,7 @@ function createMcpServer(): McpServer {
           return !parsed.isDeleted && parsed.title === trimmed;
         });
         if (clash) {
-          return { content: [{ type: "text" as const, text: `Un tag "${trimmed}" existe déjà (ID: ${clash.id}) — renommer créerait un doublon. Utilise attach_tag_to_note puis detach/detach_tag_from_note pour fusionner à la main.` }] };
+          return { content: [{ type: "text" as const, text: `A tag "${trimmed}" already exists (ID: ${clash.id}) - renaming would create a duplicate. Use attach_tag_to_note then detach_tag_from_note to merge by hand.` }], isError: true };
         }
         const now = Date.now();
         const contentBytes = Buffer.from(JSON.stringify({ ...parseRawJson(tag.content), title: trimmed, user_updated_time: now }), "utf-8");
@@ -2000,8 +2002,8 @@ function createMcpServer(): McpServer {
           [contentBytes, contentBytes.length, now, tag.id]
         );
         await recordChange({ itemId: tag.id, itemType: JOP_TYPE_TAG, changeType: CHANGE_UPDATED, jopId: tag.jop_id, userId, changeItemType: 1 });
-        return { content: [{ type: "text" as const, text: `✅ Tag renommé !\n🏷️ ${current.title} → ${trimmed}\n🆔 ID: ${tag.id}` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Tag renamed: **${current.title} → ${trimmed}**\nID: ${tag.id}` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -2011,9 +2013,9 @@ function createMcpServer(): McpServer {
       try {
         const userId = await getUserId();
         const tag = await findItem(tag_id, JOP_TYPE_TAG, userId);
-        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' non trouvé.` }] };
+        if (!tag) return { content: [{ type: "text" as const, text: `Tag '${tag_id}' not found.` }], isError: true };
         const parsedTag = parseJoplinContent(tag.content);
-        if (parsedTag.isDeleted) return { content: [{ type: "text" as const, text: `Le tag "${parsedTag.title}" est déjà dans la corbeille.` }] };
+        if (parsedTag.isDeleted) return { content: [{ type: "text" as const, text: `Tag "${parsedTag.title}" is already in the trash.` }], isError: true };
         const now = Date.now();
         const relations = await pool.query(`SELECT id, content, jop_id FROM items WHERE owner_id = $1 AND jop_type = $2`, [userId, JOP_TYPE_NOTE_TAG]);
         const alive = relations.rows.filter((row: any) => {
@@ -2034,8 +2036,8 @@ function createMcpServer(): McpServer {
           [contentBytes, contentBytes.length, now, tag.id]
         );
         await recordChange({ itemId: tag.id, itemType: JOP_TYPE_TAG, changeType: CHANGE_DELETED, jopId: tag.jop_id, userId, changeItemType: 2 });
-        return { content: [{ type: "text" as const, text: `🗑️ Tag supprimé !\n🏷️ ${parsedTag.title}\n🆔 ID: ${tag.id}\n💡 ${alive.length} assignation(s) retirée(s) ; les notes sont intactes.` }] };
-      } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
+        return { content: [{ type: "text" as const, text: `Tag moved to the trash: **${parsedTag.title}**\nID: ${tag.id}\n${alive.length} assignment(s) removed; the notes are untouched.` }] };
+      } catch (e: any) { return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true }; }
     }
   );
 
@@ -2045,7 +2047,7 @@ function createMcpServer(): McpServer {
 async function main() {
   // Fail closed: this process reads and writes the notes database, it must never run unauthenticated
   if (!MCP_API_KEY || MCP_API_KEY.trim() === "" || MCP_API_KEY === "change-me") {
-    console.error("❌ MCP_API_KEY is required and must be set to a real secret.");
+    console.error("MCP_API_KEY is required and must be set to a real secret.");
     console.error("   This server reads and writes your Joplin database: it refuses to start without authentication.");
     console.error("   Generate one with: openssl rand -hex 32");
     process.exit(1);
@@ -2053,10 +2055,10 @@ async function main() {
 
   try {
     const client = await pool.connect();
-    console.log("✅ Connected to Joplin PostgreSQL database");
+    console.log("Connected to Joplin PostgreSQL database");
     client.release();
   } catch (e) {
-    console.error("❌ Failed to connect to database:", e);
+    console.error("Failed to connect to database:", e);
     process.exit(1);
   }
 
@@ -2084,7 +2086,7 @@ async function main() {
 
   // Debug logging
   app.use((req, _res, next) => {
-    console.log(`📨 ${req.method} ${req.url} Host=${req.headers.host || "none"}`);
+    console.log(`[http] ${req.method} ${req.url} host=${req.headers.host || "none"}`);
     next();
   });
 
@@ -2100,7 +2102,7 @@ async function main() {
   const sessions: Map<string, { transport: StreamableHTTPServerTransport; server: McpServer }> = new Map();
 
   app.post("/mcp", express.json({ limit: MCP_JSON_LIMIT }), async (req, res) => {
-    console.log(`🔌 POST /mcp body keys: ${Object.keys(req.body || {}).join(",")}`);
+    console.log(`[mcp] POST /mcp body keys: ${Object.keys(req.body || {}).join(",")}`);
     try {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
       let entry: { transport: StreamableHTTPServerTransport; server: McpServer };
@@ -2117,7 +2119,7 @@ async function main() {
         const sid = transport.sessionId || crypto.randomUUID();
         sessions.set(sid, entry);
         transport.onclose = () => {
-          console.log(`🔌 Session ${sid} closed`);
+          console.log(`[mcp] session ${sid} closed`);
           sessions.delete(sid);
         };
         await mcpServer.connect(transport);
@@ -2242,10 +2244,10 @@ async function main() {
 
   // SSE transport
   app.get("/sse", (req, res) => {
-    console.log("📡 SSE connection request received");
+    console.log("[sse] connection request received");
     const mcpServer = createMcpServer();
     const transport = new SSEServerTransport("/messages", res);
-    transport.onclose = () => { console.log("📡 SSE session closed"); };
+    transport.onclose = () => { console.log("[sse] session closed"); };
     mcpServer.connect(transport).catch((err: Error) => { console.error("SSE connection error:", err); });
   });
 
@@ -2254,7 +2256,7 @@ async function main() {
   });
 
   app.listen(MCP_PORT, "0.0.0.0", () => {
-    console.log(`✅ Joplin MCP Server listening on 0.0.0.0:${MCP_PORT}`);
+    console.log(`joplin-mcp listening on 0.0.0.0:${MCP_PORT}`);
     console.log(`   SSE endpoint: http://0.0.0.0:${MCP_PORT}/sse`);
     console.log(`   Streamable HTTP endpoint: http://0.0.0.0:${MCP_PORT}/mcp`);
     console.log(`   Health check: http://0.0.0.0:${MCP_PORT}/health`);

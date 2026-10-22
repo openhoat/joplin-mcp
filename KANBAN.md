@@ -5,12 +5,6 @@ lives in [CHANGELOG.md](CHANGELOG.md) and `git log`.
 
 ## Backlog
 
-### #3 [I18N] English agent-facing output
-
-- [ ] translate the result strings of the 37 tools (roughly 150 strings); tool names, arguments and
-      item shapes stay untouched
-- [ ] replay the real-data round trips (notes, notebooks, todos, attachments, trash, tags, history)
-
 ### #4 [REFACTOR] Split the monolith
 
 - [ ] `src/index.ts` is ~2 250 lines: extract the database layer, the HTTP layer and the tools by
