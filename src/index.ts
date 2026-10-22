@@ -535,7 +535,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.4.0" });
+  const server = new McpServer({ name: "joplin", version: "1.4.1" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -902,7 +902,7 @@ function createMcpServer(): McpServer {
         const userId = await getUserId();
         const jopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1`, [note_id]);
         const jopId = jopIdResult.rows.length > 0 ? jopIdResult.rows[0].jop_id : note_id;
-        await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId: jopId, userId });
+        await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId: jopId, userId, changeItemType: 1 });
         const todoLine = (() => {
           if (!hasTodoChange) return "";
           if (Number(extra.is_todo) !== 1) return "\n☑️ Todo désactivé (note simple)";
@@ -976,7 +976,7 @@ function createMcpServer(): McpServer {
         const userId = await getUserId();
         const jopIdResult = await pool.query(`SELECT jop_id FROM items WHERE id = $1`, [note_id]);
         const jopId = jopIdResult.rows.length > 0 ? jopIdResult.rows[0].jop_id : note_id;
-        await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId, userId });
+        await recordChange({ itemId: note_id, itemType: JOP_TYPE_NOTE, changeType: CHANGE_UPDATED, jopId, userId, changeItemType: 1 });
         return { content: [{ type: "text" as const, text: `📦 Note déplacée !\n📝 Note: ${noteParsed.title}\n📂 Vers: ${folderParsed.title}` }] };
       } catch (e: any) { return { content: [{ type: "text" as const, text: `Erreur: ${e.message}` }] }; }
     }
