@@ -617,7 +617,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.9.0" });
+  const server = new McpServer({ name: "joplin", version: "1.9.1" });
 
   // ====== SEARCH / READ TOOLS ======
 

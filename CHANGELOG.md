@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-10-22
+
+### Fixed
+
+- `create_note` prints the destination notebook title instead of its raw `jop_id`, so a caller can
+  check where the note landed without a second lookup.
+
 ## [1.9.0] - 2026-10-22
 
 ### Changed
@@ -14,8 +21,6 @@ All notable changes to this project are documented in this file. The format foll
 - Failures are now flagged with `isError: true` (96 return paths) instead of being plain results, so
   an agent can tell "the note does not exist" from "the search returned nothing".
 - Sizes use English units (`B`, `KB`, `MB`) and todo lines use `[ ]` / `[x]` instead of pictograms.
-- `create_note` prints the destination notebook title instead of its raw `jop_id`, so a caller can
-  check where the note landed without a second lookup.
 
 ## [1.8.0] - 2026-10-22
 
@@ -129,6 +134,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - Imported from the `docker-stacks` monorepo into a dedicated repository, unchanged.
 
+[1.9.1]: https://github.com/openhoat/joplin-mcp/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/openhoat/joplin-mcp/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/openhoat/joplin-mcp/compare/v1.6.3...v1.8.0
 [1.6.3]: https://github.com/openhoat/joplin-mcp/compare/v1.6.2...v1.6.3
