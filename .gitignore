@@ -2,3 +2,4 @@ node_modules/
 dist/
 buildx-config.toml
 __pycache__/
+.env
