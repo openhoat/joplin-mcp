@@ -21,7 +21,7 @@ const DB_PASSWORD = process.env.JOPLIN_DB_PASSWORD || "postgres";
 const USER_ID = process.env.JOPLIN_USER_ID || "";
 const MCP_PORT = parseInt(process.env.MCP_PORT || "8000");
 const MCP_API_KEY = process.env.MCP_API_KEY || "";
-const MCP_PUBLIC_URL = (process.env.MCP_PUBLIC_URL || "http://localhost:8000").replace(/\/+$/, "");
+const MCP_PUBLIC_URL = (process.env.MCP_PUBLIC_URL || `http://localhost:${MCP_PORT}`).replace(/\/+$/, "");
 
 const JOP_TYPE_NOTE = 1;
 const JOP_TYPE_FOLDER = 2;
@@ -617,7 +617,7 @@ function resourceSummary(row: JoplinItemRow): { id: string; jopId: string; title
 }
 
 function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "joplin", version: "1.6.3" });
+  const server = new McpServer({ name: "joplin", version: "1.8.0" });
 
   // ====== SEARCH / READ TOOLS ======
 
@@ -2043,6 +2043,14 @@ function createMcpServer(): McpServer {
 }
 
 async function main() {
+  // Fail closed: this process reads and writes the notes database, it must never run unauthenticated
+  if (!MCP_API_KEY || MCP_API_KEY.trim() === "" || MCP_API_KEY === "change-me") {
+    console.error("❌ MCP_API_KEY is required and must be set to a real secret.");
+    console.error("   This server reads and writes your Joplin database: it refuses to start without authentication.");
+    console.error("   Generate one with: openssl rand -hex 32");
+    process.exit(1);
+  }
+
   try {
     const client = await pool.connect();
     console.log("✅ Connected to Joplin PostgreSQL database");
@@ -2054,24 +2062,25 @@ async function main() {
 
   const app = express();
 
-  // Middleware d'authentification MCP
-  if (MCP_API_KEY) {
-    app.use((req, res, next) => {
-      // Exclure les endpoints publics (health, root)
-      if (req.path === "/health" || req.path === "/") {
-        return next();
-      }
-      const authHeader = req.headers.authorization || "";
-      if (!authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing or invalid Authorization header" });
-      }
-      const providedKey = authHeader.split("Bearer ")[1].trim();
-      if (providedKey !== MCP_API_KEY) {
-        return res.status(401).json({ error: "Invalid API key" });
-      }
-      next();
-    });
-  }
+  // Bearer authentication on every route except the two public probes.
+  // Tokens are compared through their SHA-256 digests: timingSafeEqual needs equal
+  // lengths, and the digest also hides the key length from a timing observer.
+  const apiKeyDigest = crypto.createHash("sha256").update(MCP_API_KEY).digest();
+  app.use((req, res, next) => {
+    if (req.path === "/health" || req.path === "/") {
+      return next();
+    }
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Missing or invalid Authorization header" });
+    }
+    const providedKey = authHeader.slice("Bearer ".length).trim();
+    const providedDigest = crypto.createHash("sha256").update(providedKey).digest();
+    if (!crypto.timingSafeEqual(providedDigest, apiKeyDigest)) {
+      return res.status(401).json({ error: "Invalid API key" });
+    }
+    next();
+  });
 
   // Debug logging
   app.use((req, _res, next) => {
