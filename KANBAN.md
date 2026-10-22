@@ -23,6 +23,8 @@ lives in [CHANGELOG.md](CHANGELOG.md) and `git log`.
       `buildResourceContent`, `renderHistoryDiff`
 - [ ] integration run against a throwaway Joplin Server + PostgreSQL compose (create, update, trash,
       restore, purge — the cycle applied by hand today)
+- [ ] run the README quick-start compose end to end: it doubles as the integration stack, and it has
+      never been executed as written
 - [ ] GitHub Actions: typecheck, tests, build, markdownlint on the docs
 - [ ] add the CI badge to the README once the workflow exists
 
