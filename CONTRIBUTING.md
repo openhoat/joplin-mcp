@@ -19,7 +19,8 @@ source alone: inspect the rows a client writes, then implement.
 - **Deletions go to the trash**; nothing the server does may purge a blob or break a `:/` link that a
   note body relies on.
 - **Test on a disposable notebook, note and attachment**, then purge the rows so that no residue is
-  left in the database. This is how every feature here was validated.
+  left in the database — `npm run test:e2e` automates exactly that against the compose stack, so
+  extend it with your feature instead of repeating the ritual by hand.
 
 ## Sending a change
 

@@ -50,3 +50,72 @@ jobs:
 
       - name: Build image
         run: docker build -t joplin-mcp:ci .
+
+  integration:
+    name: Integration (real stack)
+    runs-on: ubuntu-24.04
+    needs: validate
+    # Placeholders for a throwaway stack on the runner: never real credentials,
+    # and localhost-only. The server still refuses to start without a key, which
+    # is exactly the behaviour under test.
+    env:
+      POSTGRES_PASSWORD: ci-postgres-password
+      MCP_API_KEY: ci-mcp-api-key
+      E2E_API_KEY: ci-mcp-api-key
+      E2E_DB_PASSWORD: ci-postgres-password
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start the stack (compose.yml as documented)
+        run: |
+          docker compose -f compose.yml -f compose.ci.yml up -d --build
+
+          # Joplin Server creates the whole schema on first start, so the `users`
+          # table is the signal that the database is ready for the MCP server.
+          for attempt in $(seq 1 60); do
+            if docker compose -f compose.yml -f compose.ci.yml exec -T postgres \
+              psql -U joplin -d joplin -tAc "select to_regclass('public.users')" | grep -q users; then
+              echo "schema ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "::error::the Joplin schema never appeared"
+          docker compose -f compose.yml -f compose.ci.yml logs --no-color
+          exit 1
+
+      - name: Wait for the MCP server
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/health; then
+              echo "health ok after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::the MCP server never answered /health"
+          docker compose -f compose.yml -f compose.ci.yml logs --no-color
+          exit 1
+
+      - name: Run the end-to-end suite
+        run: npm run test:e2e
+
+      - name: Stack logs
+        if: failure()
+        run: docker compose -f compose.yml -f compose.ci.yml logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f compose.yml -f compose.ci.yml down -v

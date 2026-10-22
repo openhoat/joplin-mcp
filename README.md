@@ -62,60 +62,13 @@ docker build -t joplin-mcp:latest .
 
 ### 2. Run it next to a Joplin Server
 
-```yaml
-# compose.yml — Joplin Server + PostgreSQL + the MCP server
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: joplin
-      POSTGRES_USER: joplin
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U joplin -d joplin"]
-      interval: 5s
-      retries: 10
-
-  joplin:
-    image: joplin/server:3.7.2
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      APP_PORT: "22300"
-      APP_BASE_URL: http://localhost:22300
-      DB_CLIENT: pg
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      POSTGRES_DATABASE: joplin
-      POSTGRES_USER: joplin
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
-    ports:
-      - "22300:22300"
-
-  joplin-mcp:
-    image: joplin-mcp:latest
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      JOPLIN_DB_HOST: postgres
-      JOPLIN_DB_NAME: joplin
-      JOPLIN_DB_USER: joplin
-      JOPLIN_DB_PASSWORD: ${POSTGRES_PASSWORD:?}
-      MCP_API_KEY: ${MCP_API_KEY:?set MCP_API_KEY}
-    ports:
-      - "8000:8000"
-
-volumes:
-  pgdata:
-```
+[compose.yml](compose.yml) describes the three services: PostgreSQL, Joplin Server and the MCP
+server. It is the same file CI starts for the end-to-end suite (`compose.ci.yml` only publishes
+PostgreSQL on loopback), so the documented stack and the tested stack cannot drift apart.
 
 ```bash
 cp .env.example .env    # set POSTGRES_PASSWORD and MCP_API_KEY, then:
-docker compose up -d
+docker compose up -d --build
 ```
 
 Generate the API key with `openssl rand -hex 32`: the server **refuses to start** without a real
@@ -311,12 +264,25 @@ dates, history diffs, ids and markdown links. That is where the Joplin shapes li
 regression is cheapest to catch. Coverage thresholds apply to it and ratchet up as the handlers move
 behind testable seams ([KANBAN.md](KANBAN.md)).
 
-The tool handlers still talk to PostgreSQL directly and are not mocked: a fake pool would only
-assert that the mock was called. Working on the write path means testing against a real database —
-every change is verified on a disposable notebook, note and attachment, then purged so that no
-residue remains.
+The handlers talk to PostgreSQL directly and are never mocked: a fake pool would only assert that
+the mock was called. `src/test/e2e/` drives the real stack instead — the HTTP transport, the writes
+and the rows they must produce.
 
-CI runs the same gate on every push and pull request, plus a Docker build of the image.
+```bash
+docker compose -f compose.yml -f compose.ci.yml up -d --build
+
+E2E_API_KEY=<MCP_API_KEY> E2E_DB_PASSWORD=<POSTGRES_PASSWORD> npm run test:e2e
+
+docker compose -f compose.yml -f compose.ci.yml down -v
+```
+
+The suite walks one lifecycle in order (notebook, note, todo, attachment, tag, trash, restore),
+asserts the `items` and `changes_2` rows each call must write, then purges what it created and
+refuses to pass while any row mentions its `e2e-…` prefix. It is skipped — not failed — when
+`E2E_API_KEY` and `E2E_DB_PASSWORD` are absent, so a plain checkout stays green without Docker.
+
+CI runs the same gate on every push and pull request, plus a Docker build of the image and that
+end-to-end run against the compose stack.
 
 ## Out of scope
 
