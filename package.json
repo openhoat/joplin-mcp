@@ -1,25 +1,72 @@
 {
   "name": "joplin-mcp-server",
-  "version": "1.9.1",
-  "description": "Joplin MCP Server",
+  "version": "1.10.0",
+  "description": "MCP server for Joplin — notes, notebooks, todos, attachments, tags and trash through the Joplin Server PostgreSQL database.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "joplin",
+    "notes",
+    "postgresql",
+    "ai"
+  ],
+  "license": "MIT",
+  "author": "Olivier Penhoat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openhoat/joplin-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/openhoat/joplin-mcp/issues"
+  },
+  "homepage": "https://github.com/openhoat/joplin-mcp#readme",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "joplin-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js"
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "qa": "npm run qa:biome && npm run qa:prettier && npm run qa:markdown",
+    "qa:biome": "biome check src/",
+    "qa:biome:fix": "biome check --write src/",
+    "qa:markdown": "markdownlint-cli2",
+    "qa:markdown:fix": "markdownlint-cli2 --fix",
+    "qa:prettier": "prettier --check \"**/*.md\"",
+    "qa:prettier:fix": "prettier --write \"**/*.md\"",
+    "qa:fix": "npm run qa:biome:fix && npm run qa:prettier:fix && npm run qa:markdown:fix",
+    "validate": "npm run qa && npm run typecheck && npm run test:coverage && npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "pg": "^8.13.0",
-    "express": "^4.21.0",
     "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "pg": "^8.13.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.13",
+    "@types/cors": "^2.8.0",
+    "@types/express": "^4.17.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
-    "@types/express": "^4.17.0",
-    "@types/cors": "^2.8.0",
-    "typescript": "^5.7.0"
+    "@vitest/coverage-v8": "5.0.5",
+    "markdownlint-cli2": "0.23.1",
+    "prettier": "3.9.6",
+    "typescript": "^5.7.0",
+    "vitest": "5.0.5"
   }
 }

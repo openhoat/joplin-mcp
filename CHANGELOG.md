@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-10-22
+
+### Added
+
+- Unit test suite (39 tests) over the pure layer: Joplin content parsing and building, formatting,
+  todo dates, history diffs, ids and markdown links. Coverage gate at 90 % of lines, statements and
+  functions, 85 % of branches.
+- GitHub Actions pipeline: biome, prettier and markdownlint, typecheck, tests with coverage, build,
+  and a Docker image build on every push and pull request. CI badge in the README.
+- npm scripts `qa`, `typecheck`, `test`, `test:coverage` and `validate`, so the local gate and the CI
+  gate are the same command.
+
+### Changed
+
+- The pure helpers moved out of `src/index.ts` into `src/lib/` (337 lines less in the monolith), with
+  no behaviour change: tool names, arguments and results are identical.
+- Docker image rebuilt on `node:24-alpine` — the `node:20` base was out of support — in two stages,
+  with `npm ci` against the lockfile instead of `npm install`; the runtime stage carries production
+  dependencies only.
+
 ## [1.9.1] - 2026-10-22
 
 ### Fixed
@@ -134,6 +154,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - Imported from the `docker-stacks` monorepo into a dedicated repository, unchanged.
 
+[1.10.0]: https://github.com/openhoat/joplin-mcp/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/openhoat/joplin-mcp/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/openhoat/joplin-mcp/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/openhoat/joplin-mcp/compare/v1.6.3...v1.8.0

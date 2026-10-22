@@ -12,6 +12,7 @@ history — 37 tools over the Model Context Protocol, one container, one databas
 > before pointing it at real notes.**
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/openhoat/joplin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/openhoat/joplin-mcp/actions/workflows/ci.yml)
 [![node: 20+](https://img.shields.io/badge/node-20%2B-green.svg)](Dockerfile)
 [![MCP: streamable-http](https://img.shields.io/badge/MCP-streamable--http-8A2BE2.svg)](https://modelcontextprotocol.io)
 
@@ -142,9 +143,9 @@ opencode — `opencode.jsonc`, remote MCP with a header (V2 nests servers under 
     "joplin": {
       "type": "remote",
       "url": "http://localhost:8000/mcp",
-      "headers": { "Authorization": "Bearer {env:JOPLIN_API_KEY}" }
-    }
-  }
+      "headers": { "Authorization": "Bearer {env:JOPLIN_API_KEY}" },
+    },
+  },
 }
 ```
 
@@ -294,16 +295,28 @@ The exact shapes, the ones real clients write in Joplin 3.7.2, live in
 ## Development
 
 ```bash
-npm install
-npm run build     # tsc → dist/
-npm start         # node dist/index.js (reads the environment above)
+npm ci
+npm run build        # tsc → dist/ (tests excluded)
+npm start            # node dist/index.js (reads the environment above)
+
+npm run qa           # biome (lint + format), prettier and markdownlint
+npm run typecheck    # tsc --noEmit, tests included
+npm test             # vitest unit suite
+npm run test:coverage
+npm run validate     # qa + typecheck + coverage + build — the gate CI runs
 ```
 
-The source is a single file today (`src/index.ts`, ~2 250 lines); splitting it into modules comes with
-the test suite ([KANBAN.md](KANBAN.md)).
+The pure layer (`src/lib/`) is unit-tested: item content parsing and building, formatting, todo
+dates, history diffs, ids and markdown links. That is where the Joplin shapes live, so it is where a
+regression is cheapest to catch. Coverage thresholds apply to it and ratchet up as the handlers move
+behind testable seams ([KANBAN.md](KANBAN.md)).
 
-Working on the write path means testing against a real database: every change is verified on a
-disposable notebook, note and attachment, then purged so that no residue remains.
+The tool handlers still talk to PostgreSQL directly and are not mocked: a fake pool would only
+assert that the mock was called. Working on the write path means testing against a real database —
+every change is verified on a disposable notebook, note and attachment, then purged so that no
+residue remains.
+
+CI runs the same gate on every push and pull request, plus a Docker build of the image.
 
 ## Out of scope
 

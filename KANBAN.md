@@ -7,20 +7,24 @@ lives in [CHANGELOG.md](CHANGELOG.md) and `git log`.
 
 ### #4 [REFACTOR] Split the monolith
 
-- [ ] `src/index.ts` is ~2 250 lines: extract the database layer, the HTTP layer and the tools by
-      domain (`notes`, `notebooks`, `attachments`, `tags`, `trash`, `history`)
+- [x] move the pure layer to `src/lib/`: content, format, todo, history, ids, markdown, resource,
+      types (`src/index.ts` is down to ~1 970 lines)
+- [ ] extract the PostgreSQL layer (`pool`, `recordChange`, `findItem`, resource read/write) behind a
+      seam so the handlers become testable without a database
+- [ ] split the tools by domain (`notes`, `notebooks`, `attachments`, `tags`, `trash`, `history`)
 - [ ] keep the behaviour and every tool schema identical; `docs/sync-shapes.md` stays the reference
 
-### #5 [TESTS] Unit and integration suite, CI
+### #5 [TESTS] Integration suite
 
-- [ ] vitest on the pure pieces: `recordChange`, `parseDueDate`, `resourceSummary`,
-      `buildResourceContent`, `renderHistoryDiff`
+- [x] vitest on the pure layer (39 tests, 98 % of statements) and `create_note` no longer prints a raw
+      `jop_id`
+- [x] coverage gate: 90 % of lines, statements and functions, 85 % of branches on `src/lib/**`
+- [x] GitHub Actions: lint, prettier, markdownlint, typecheck, tests with coverage, build, Docker build
+- [x] CI badge in the README
 - [ ] integration run against a throwaway Joplin Server + PostgreSQL compose (create, update, trash,
-      restore, purge — the cycle applied by hand today)
+      restore, purge — the cycle applied by hand today), wired into CI
 - [ ] run the README quick-start compose end to end: it doubles as the integration stack, and it has
       never been executed as written
-- [ ] GitHub Actions: typecheck, tests, build, markdownlint on the docs
-- [ ] add the CI badge to the README once the workflow exists
 
 ### #6 [DISTRIBUTION] Publish what is already built
 

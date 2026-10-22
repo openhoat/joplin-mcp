@@ -8,15 +8,15 @@ tables directly: a wrong shape means invisible or corrupt items on the clients.
 
 All syncable objects are rows of `items` (one table, `jop_type` discriminates):
 
-| jop_type | object | `name` | `mime_type` | notes |
-| -------- | ------ | ------ | ----------- | ----- |
-| 0 | resource **blob** | `.resource/<jop_id>` | `''` | `jop_id=''`, `jop_parent_id=''`, `jop_share_id=''`, `jop_updated_time=0`, `content` = raw bytes |
-| 1 | note | `<jop_id>.md` | `text/markdown` | JSON body |
-| 2 | notebook (folder) | `<jop_id>.md` | `text/markdown` | JSON body |
-| 4 | resource metadata | `<jop_id>.md` | `text/markdown` | JSON body, `title` = file name |
-| 5 | tag | `<jop_id>.md` | `text/markdown` | JSON body |
-| 6 | note↔tag relation | `<jop_id>.md` | `text/markdown` | `{tag_id, note_id}` (32-hex jop ids) |
-| 13 | server-side note history | `<jop_id>.md` | `text/markdown` | written by the server only — never create one |
+| jop_type | object                   | `name`               | `mime_type`     | notes                                                                                           |
+| -------- | ------------------------ | -------------------- | --------------- | ----------------------------------------------------------------------------------------------- |
+| 0        | resource **blob**        | `.resource/<jop_id>` | `''`            | `jop_id=''`, `jop_parent_id=''`, `jop_share_id=''`, `jop_updated_time=0`, `content` = raw bytes |
+| 1        | note                     | `<jop_id>.md`        | `text/markdown` | JSON body                                                                                       |
+| 2        | notebook (folder)        | `<jop_id>.md`        | `text/markdown` | JSON body                                                                                       |
+| 4        | resource metadata        | `<jop_id>.md`        | `text/markdown` | JSON body, `title` = file name                                                                  |
+| 5        | tag                      | `<jop_id>.md`        | `text/markdown` | JSON body                                                                                       |
+| 6        | note↔tag relation        | `<jop_id>.md`        | `text/markdown` | `{tag_id, note_id}` (32-hex jop ids)                                                            |
+| 13       | server-side note history | `<jop_id>.md`        | `text/markdown` | written by the server only — never create one                                                   |
 
 Constraints: `UNIQUE(name, owner_id)`, `UNIQUE(id)`, `content_storage_id = 1` (database
 storage; `STORAGE_DRIVER` unset in the stack).
