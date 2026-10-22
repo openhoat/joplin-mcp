@@ -42,6 +42,15 @@ with a `todo_due` date, the client schedules the notification. Turning a note ba
 plain note clears the three fields. Marking done writes the current time in
 `todo_completed`; reopening sets it back to `0`.
 
+## Replacing an attachment's content
+
+The bytes are updated in place: the blob row keeps its `id` and `name`
+(`.resource/<jop_id>`), the metadata keeps its `id` and `jop_id`. That is what makes a replace
+safe — every `:/` link already written in note bodies keeps resolving. Refresh `size`, `mime`,
+`file_extension`, `blob_updated_time` and `user_updated_time` in the metadata, `content` /
+`content_size` / `updated_time` in the blob row (leave the blob's `jop_updated_time` at 0, as the
+desktop writes it), then write one update change per row (type 2, `item_type` 1).
+
 ## Resources (attachments)
 
 Metadata item (`jop_type=4`) JSON: `{is_locked, ocr_*, blob_updated_time, user_data,
