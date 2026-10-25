@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-10-25
+
+### Changed
+
+- Tool arguments are validated against a **strict** schema (`registerTool` with
+  `z.object(shape).strict()` instead of the deprecated `server.tool`): an unknown or misspelled
+  field is rejected with `InvalidParams` naming the key, instead of being silently stripped. A call
+  such as `update_note({ note_id, content })` used to answer "updated" without touching the body;
+  it now fails before the handler runs.
+- `parseRawJson` fails closed (`MalformedItemContentError`) when a stored item is not a Joplin v3
+  JSON object, instead of returning `{}` and letting a write rebuild the document from scratch.
+  `update_note`, `delete_note` and the attachment link helpers merge from that strict parse; display
+  paths keep the lenient `parseJoplinContent`.
+- The `update_note` and `create_note` descriptions name the `body` field explicitly and state that
+  unknown fields are rejected.
+
+### Tests
+
+- Unit: the strict parser rejects plain text, arrays, scalars and `null`.
+- End to end: `update_note` carrying a stray `content` field is a protocol error (`Unrecognized key`).
+
 ## [1.12.0] - 2026-10-22
 
 ### Changed
