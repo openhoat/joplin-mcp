@@ -4,11 +4,13 @@ import { parseJoplinContent, parseRawJson } from "../lib/content.js";
 import { formatTimestamp } from "../lib/format.js";
 import { JOP_TYPE_NOTE, JOP_TYPE_TAG, type JoplinItemRow } from "../lib/joplin-types.js";
 import type { ToolDeps } from "./deps.js";
+import { defineTool } from "./tool.js";
 
 export function registerTagTools(server: McpServer, deps: ToolDeps): void {
   const { store } = deps;
 
-  server.tool(
+  defineTool(
+    server,
     "list_tags",
     "List all Joplin tags with their note counts. Use the returned tag ID with `attach_tag_to_note` / `detach_tag_from_note`.",
     {},
@@ -42,7 +44,8 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "add_tag",
     "Create a new Joplin tag. Returns the tag ID for `attach_tag_to_note`.",
     { title: z.string().describe("Tag title") },
@@ -62,7 +65,8 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "list_note_tags",
     "List the tags assigned to a note.",
     { note_id: z.string().describe("The ID of the note") },
@@ -90,7 +94,8 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "attach_tag_to_note",
     "Assign a tag to a note. Creates the note<->tag relation item used by Joplin sync; no-op if the tag is already assigned.",
     {
@@ -128,7 +133,8 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "detach_tag_from_note",
     "Remove a tag from a note (soft-deletes the note<->tag relation item). The tag itself is kept.",
     {
@@ -166,7 +172,8 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "list_notes_with_tag",
     "List the notes carrying a tag, most recently updated first (resolves the note<->tag relations used by Joplin sync).",
     {
@@ -218,7 +225,8 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "rename_tag",
     "Rename a tag. The tag id is kept, so every note assignment survives.",
     {
@@ -257,7 +265,8 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "delete_tag",
     "Delete a tag: trashes the tag and all its note assignments (soft delete, same as the desktop). The notes themselves are never touched.",
     { tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)") },

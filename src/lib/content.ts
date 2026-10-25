@@ -17,7 +17,11 @@ export function readContent(raw: Buffer | string | null): string {
   return String(raw);
 }
 
-/** Parse Joplin v3 JSON content. Returns { title, body, ...metadata } or falls back to raw content. */
+/**
+ * Lenient parse used by display paths: a row that is not valid v3 JSON is shown
+ * as its raw text rather than failing the read. Anything that rewrites a stored
+ * document must go through `parseRawJson`, which throws instead of guessing.
+ */
 export function parseJoplinContent(raw: Buffer | string | null): JoplinContent {
   const content = readContent(raw);
   if (!content) return { title: "(untitled)", body: "", isDeleted: false, json: null };
@@ -42,16 +46,41 @@ export function parseJoplinContent(raw: Buffer | string | null): JoplinContent {
   }
 }
 
-/** Parse raw item content as JSON, preserving ALL fields (incl. the nested 'icon' string). */
+/**
+ * Raised when a stored item is not the Joplin v3 JSON document every tool
+ * expects. Display paths read such a row through the lenient
+ * `parseJoplinContent`; every path that rebuilds or merges the stored document
+ * goes through `parseRawJson` and fails here, instead of writing a fabricated
+ * object over the original.
+ */
+export class MalformedItemContentError extends Error {
+  constructor(detail: string) {
+    super(`Stored item content is not valid Joplin v3 JSON (${detail}); refusing to operate on it.`);
+    this.name = "MalformedItemContentError";
+  }
+}
+
+const isJsonObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * Parse raw item content as JSON, preserving ALL fields (incl. the nested
+ * 'icon' string). Throws {@link MalformedItemContentError} on anything else:
+ * a write must never rebuild a document it could not read.
+ */
 export function parseRawJson(raw: Buffer | string | null): Record<string, any> {
   const content = readContent(raw);
   if (!content) return {};
+  let parsed: unknown;
   try {
-    return JSON.parse(content) as Record<string, any>;
-  } catch {
-    // Fallback to the lenient parser if the raw content is not strictly valid JSON
-    return parseJoplinContent(raw).json || {};
+    parsed = JSON.parse(content);
+  } catch (error) {
+    throw new MalformedItemContentError(error instanceof Error ? error.message : String(error));
   }
+  if (!isJsonObject(parsed)) {
+    throw new MalformedItemContentError("the top-level value is not a JSON object");
+  }
+  return parsed;
 }
 
 /** Build Joplin v3 JSON content for a new note */

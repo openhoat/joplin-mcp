@@ -287,6 +287,9 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     expectRefusal(await mcp.call("delete_resource", { resource_id: state.resource }), "is still referenced");
     expectRefusal(await mcp.call("get_note", { note_id: "doesnotexist" }), "not found");
     expectRefusal(await mcp.call("update_note", { note_id: state.note }), "provide at least");
+    // A misspelled field is a protocol error, never a silent no-op: a stray
+    // `content` used to be stripped by the SDK, answering "updated" with nothing written.
+    await expect(mcp.call("update_note", { note_id: state.note, content: "typo" })).rejects.toThrow(/Unrecognized key/);
     expectText(await mcp.call("search_notes", { query: "zzzz-introuvable-zzzz" }), "No note found");
   });
 

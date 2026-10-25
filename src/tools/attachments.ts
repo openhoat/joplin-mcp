@@ -5,11 +5,13 @@ import { formatBytes } from "../lib/format.js";
 import { JOP_TYPE_NOTE, JOP_TYPE_RESOURCE, type JoplinItemRow } from "../lib/joplin-types.js";
 import { resourceSummary } from "../lib/resource.js";
 import type { ToolDeps } from "./deps.js";
+import { defineTool } from "./tool.js";
 
 export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void {
   const { store, publicUrl } = deps;
 
-  server.tool(
+  defineTool(
+    server,
     "list_note_attachments",
     "List the file attachments (resources) of a note. Returns resource IDs usable with `get_resource`, `download_resource`, `attach_resource_to_note` and `unlink_resource_from_note`.",
     {
@@ -36,7 +38,8 @@ export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "list_resources",
     "List the most recently updated file attachments (resources) across all notes. Returns resource IDs for `download_resource` / `attach_resource_to_note`.",
     {
@@ -57,7 +60,8 @@ export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "get_resource",
     "Get the metadata of a file attachment (resource): title, MIME type, size, blob presence and the notes that reference it. Use `download_resource` for the bytes.",
     { resource_id: z.string().describe("The resource ID (MCP id or Joplin 32-hex id)") },
@@ -87,7 +91,8 @@ export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "download_resource",
     "Download a file attachment (resource) and return its bytes as base64. Inline output is capped (default 10 MiB, max 32 MiB); for bigger files use the GET /files/<id> endpoint of this server instead.",
     {
@@ -131,7 +136,8 @@ export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "add_resource",
     "Attach a file to a note from inline base64 content (small files only, max 32 MiB). Creates the Joplin resource (metadata + binary blob) and, when note_id is provided, appends the markdown link to the note. For bigger files use the POST /files endpoint of this server.",
     {
@@ -184,7 +190,8 @@ export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "attach_resource_to_note",
     "Append a markdown link to an existing resource (attachment) into a note body. The resource must already exist (see `list_resources` / `add_resource`). Idempotent at the note body level: check `list_note_attachments` first if unsure.",
     {
@@ -211,7 +218,8 @@ export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "unlink_resource_from_note",
     "Remove the markdown links pointing at a resource from a note body. The resource itself is kept (it can stay attached to other notes or be downloaded later).",
     {
@@ -244,7 +252,8 @@ export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "delete_resource",
     "Delete a file attachment (resource): soft delete to the Joplin trash, same semantics as delete_note. The binary blob stays on the server until the trash is emptied from a client. Refuses when the resource is still linked from notes unless `force` is set (note bodies would keep dangling links).",
     {
@@ -290,7 +299,8 @@ export function registerAttachmentTools(server: McpServer, deps: ToolDeps): void
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "update_resource",
     "Replace the binary content of an existing attachment (new version of a file). Ids are preserved, so every link already present in note bodies keeps working. Inline base64 only (max 32 MiB); for bigger files use `PUT /files/<id>` with the raw body.",
     {

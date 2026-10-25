@@ -113,6 +113,10 @@ Ask the agent to “summarize my open todos in Joplin”: it calls `list_todos`,
 
 ## MCP tools (37)
 
+Every tool validates its arguments against a **strict** schema: an unknown or misspelled field (for
+example `content` instead of `body`) is rejected with an `InvalidParams` error instead of being
+silently stripped, so a typo can never turn into a no-op that still answers success.
+
 ### Notes (8)
 
 | Tool                     | Purpose                                                      |
@@ -244,6 +248,11 @@ replacement rewrites the blob in place so that `:/` links in note bodies survive
 
 The exact shapes, the ones real clients write in Joplin 3.7.2, live in
 [docs/sync-shapes.md](docs/sync-shapes.md).
+
+A stored item whose body is not valid Joplin v3 JSON is read leniently (display paths show the raw
+text) but never rewritten: every merge goes through a strict parser and fails with an explicit
+error, so a corrupt row is fixed in a client instead of being silently overwritten with a
+fabricated object.
 
 ## Development
 

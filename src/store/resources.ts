@@ -97,10 +97,11 @@ export function createResourceStore(pool: Pool, core: Core): ResourceStore {
     return extra;
   };
 
-  const writeNoteBody = async (note: JoplinItemRow, body: string, json: Record<string, any> | null): Promise<void> => {
+  const writeNoteBody = async (note: JoplinItemRow, body: string, json: Record<string, any>): Promise<void> => {
     const now = Date.now();
-    const parsed = parseJoplinContent(note.content);
-    const contentBytes = buildNoteContent(parsed.title, body, { ...noteExtras(json), user_updated_time: now });
+    // `json` comes from the strict parseRawJson: a document we could not read
+    // failed before this point instead of being rewritten from scratch.
+    const contentBytes = buildNoteContent(json.title || "(untitled)", body, { ...noteExtras(json), user_updated_time: now });
     await pool.query("UPDATE items SET content = $1, content_size = $2, updated_time = $3, jop_updated_time = $3 WHERE id = $4", [
       contentBytes,
       contentBytes.length,
@@ -252,7 +253,7 @@ export function createResourceStore(pool: Pool, core: Core): ResourceStore {
       const trimmed = parsed.body.replace(/\s+$/, "");
       const link = buildResourceLink(resourceTitle, resourceJopId, asImage);
       const newBody = `${trimmed}${trimmed ? "\n" : ""}${link}\n`;
-      await writeNoteBody(note, newBody, parsed.json);
+      await writeNoteBody(note, newBody, parseRawJson(note.content));
       await linkUsage(note.id, resourceJopId);
     },
 
@@ -269,7 +270,7 @@ export function createResourceStore(pool: Pool, core: Core): ResourceStore {
         .replace(/[ \t]+$/gm, "")
         .replace(/\n{3,}/g, "\n\n")
         .replace(/\s+$/, "");
-      await writeNoteBody(note, newBody, parsed.json);
+      await writeNoteBody(note, newBody, parseRawJson(note.content));
       return occurrences;
     },
 

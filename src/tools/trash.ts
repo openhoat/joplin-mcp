@@ -4,11 +4,13 @@ import { parseRawJson } from "../lib/content.js";
 import { formatBytes, formatTimestamp } from "../lib/format.js";
 import { JOP_TYPE_NOTE, JOP_TYPE_RESOURCE, type JoplinItemRow } from "../lib/joplin-types.js";
 import type { ToolDeps } from "./deps.js";
+import { defineTool } from "./tool.js";
 
 export function registerTrashTools(server: McpServer, deps: ToolDeps): void {
   const { store } = deps;
 
-  server.tool(
+  defineTool(
+    server,
     "list_trash",
     "List the items currently sitting in the Joplin trash: notes and resources deleted but not purged. Use `restore_item` to bring one back.",
     {
@@ -45,7 +47,8 @@ export function registerTrashTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "restore_item",
     "Restore an item from the Joplin trash (note or resource): clears deleted_time and records an update so synced clients bring it back. The original ids (and therefore the note links) are preserved.",
     { item_id: z.string().describe("The note or resource ID (MCP id or Joplin 32-hex id)") },

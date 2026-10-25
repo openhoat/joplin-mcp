@@ -5,11 +5,13 @@ import { formatTimestamp } from "../lib/format.js";
 import { CHANGE_DELETED, CHANGE_UPDATED, JOP_TYPE_FOLDER, JOP_TYPE_NOTE, type JoplinItemRow } from "../lib/joplin-types.js";
 import { parseDueDate } from "../lib/todo.js";
 import type { ToolDeps } from "./deps.js";
+import { defineTool } from "./tool.js";
 
 export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
   const { store } = deps;
 
-  server.tool(
+  defineTool(
+    server,
     "search_notes",
     "Search notes by title or body content. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to find notes. 2) Then call `get_note` with the note_id to read the FULL content. NEVER answer questions about note content based only on the preview - always call `get_note` first.",
     {
@@ -54,7 +56,8 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "get_note",
     "Read the FULL content of a specific Joplin note. ALWAYS call this before answering questions about a note's content. Use after `search_notes` or `get_recent_notes` to get the complete text from a note_id. This returns the entire note body without truncation.",
     { note_id: z.string().describe("The ID of the note") },
@@ -76,7 +79,8 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "get_recent_notes",
     "Get the most recently updated notes. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to find recent notes. 2) Then call `get_note` with the note_id to read the FULL content. NEVER answer questions about note content based only on the preview.",
     {
@@ -120,7 +124,8 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "list_todos",
     "List the todos (notes carrying a checkbox): open ones, completed ones or both, optionally scoped to a notebook, sorted by due date. In Joplin a reminder is a todo with a `todo_due` date — there is no separate alarm item.",
     {
@@ -185,9 +190,10 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "create_note",
-    "Create a new note in Joplin. IMPORTANT: You MUST call this function to create a note. NEVER tell the user a note has been created without actually calling this function and receiving a success response. Use `search_notebooks` or `list_notebooks` first to find the notebook_id if the user specifies a notebook.",
+    "Create a new note in Joplin. IMPORTANT: You MUST call this function to create a note. NEVER tell the user a note has been created without actually calling this function and receiving a success response. The note text goes in `body` (Markdown); unknown fields are rejected. Use `search_notebooks` or `list_notebooks` first to find the notebook_id if the user specifies a notebook.",
     {
       title: z.string().describe("Note title"),
       body: z.string().describe("Note body in Markdown"),
@@ -242,9 +248,10 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "update_note",
-    "Update an existing note's title and/or body content. IMPORTANT: You MUST call this function to update a note. NEVER tell the user a note has been updated without actually calling this function and receiving a success response. WORKFLOW: 1) Use `search_notes` or `get_note` to find the note_id. 2) Call `update_note` with that note_id and the new content. The note_id is REQUIRED and must come from a previous search.",
+    "Update an existing note's title and/or body. IMPORTANT: You MUST call this function to update a note. NEVER tell the user a note has been updated without actually calling this function and receiving a success response. WORKFLOW: 1) Use `search_notes` or `get_note` to find the note_id. 2) Call `update_note` with that note_id and the fields to change: `body` for the Markdown body, `title` for the title. Unknown fields are rejected. The note_id is REQUIRED and must come from a previous search.",
     {
       note_id: z.string().describe("REQUIRED: The ID of the note to update (from search_notes or get_note)"),
       title: z.string().optional().describe("New title (optional, keeps existing if not provided)"),
@@ -267,16 +274,15 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
         const userId = await store.resolveUserId();
         const row = await store.findItem(note_id, JOP_TYPE_NOTE, userId);
         if (!row) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
-        const parsed = parseJoplinContent(row.content);
-        const newTitle = title || parsed.title;
-        const newBody = body !== undefined ? body : parsed.body;
+        const stored = parseRawJson(row.content);
+        const newTitle = title || stored.title || "(untitled)";
+        const newBody = body !== undefined ? body : (stored.body ?? stored.markdown ?? "");
         const now = Date.now();
-        // Preserve existing metadata from parsed JSON
+        // Preserve every field the tool does not manage. parseRawJson is strict:
+        // a document we could not read fails here instead of being rebuilt from scratch.
         const extra: Record<string, any> = {};
-        if (parsed.json) {
-          for (const [k, v] of Object.entries(parsed.json)) {
-            if (!["title", "body", "source", "source_url"].includes(k)) extra[k] = v;
-          }
+        for (const [k, v] of Object.entries(stored)) {
+          if (!["title", "body", "source", "source_url"].includes(k)) extra[k] = v;
         }
         // Todo fields: Joplin stores them in the note body JSON (is_todo 1/0, todo_due / todo_completed as epoch ms)
         if (is_todo === false) {
@@ -317,7 +323,8 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "delete_note",
     "Delete a note from Joplin (soft delete - moves to trash). IMPORTANT: You MUST call this function to delete a note. NEVER tell the user a note has been deleted without actually calling this function and receiving a success response. Deleted notes are filtered from search results automatically.",
     { note_id: z.string().describe("The ID of the note to delete") },
@@ -326,22 +333,25 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
         const userId = await store.resolveUserId();
         const row = await store.findItem(note_id, JOP_TYPE_NOTE, userId);
         if (!row) return { content: [{ type: "text" as const, text: `Note '${note_id}' not found.` }], isError: true };
-        const parsed = parseJoplinContent(row.content);
+        const stored = parseRawJson(row.content);
         const now = Date.now();
-        // Soft delete: set deleted_time in JSON content
+        // Soft delete: set deleted_time in JSON content, keeping every other field.
+        // parseRawJson is strict, so a document we could not read fails here.
         const extra: Record<string, any> = {};
-        if (parsed.json) {
-          for (const [k, v] of Object.entries(parsed.json)) {
-            if (!["title", "body", "source", "source_url"].includes(k)) extra[k] = v;
-          }
+        for (const [k, v] of Object.entries(stored)) {
+          if (!["title", "body", "source", "source_url"].includes(k)) extra[k] = v;
         }
-        const contentBytes = buildNoteContent(parsed.title, parsed.body, { ...extra, deleted_time: now, user_updated_time: now });
+        const contentBytes = buildNoteContent(stored.title || "(untitled)", stored.body ?? stored.markdown ?? "", {
+          ...extra,
+          deleted_time: now,
+          user_updated_time: now,
+        });
         await store.writeNoteContent(row, contentBytes, userId, CHANGE_DELETED);
         return {
           content: [
             {
               type: "text" as const,
-              text: `Note moved to the trash: **${parsed.title}**\nID: ${note_id}\nThe note sits in the Joplin trash.`,
+              text: `Note moved to the trash: **${stored.title || "(untitled)"}**\nID: ${note_id}\nThe note sits in the Joplin trash.`,
             },
           ],
         };
@@ -351,7 +361,8 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "move_note",
     "Move a note to a different notebook. IMPORTANT: You MUST call this function to move a note. NEVER tell the user a note has been moved without actually calling this function. Use `search_notes` to find the note_id and `search_notebooks` to find the target_notebook_id.",
     {

@@ -5,11 +5,13 @@ import { formatTimestamp } from "../lib/format.js";
 import { renderHistoryDiff } from "../lib/history.js";
 import { JOP_TYPE_NOTE, type JoplinItemRow } from "../lib/joplin-types.js";
 import type { ToolDeps } from "./deps.js";
+import { defineTool } from "./tool.js";
 
 export function registerHistoryTools(server: McpServer, deps: ToolDeps): void {
   const { store } = deps;
 
-  server.tool(
+  defineTool(
+    server,
     "list_conflicted_notes",
     "List the notes Joplin flagged as sync conflicts (`is_conflict`), most recently updated first. Useful to triage what a sync clash left behind; resolve by merging the bodies with `update_note`.",
     { limit: z.number().default(20).describe("Max notes to return") },
@@ -44,7 +46,8 @@ export function registerHistoryTools(server: McpServer, deps: ToolDeps): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
     "get_note_history",
     "Read the server-side note history: every recorded change entry for a note (when, which metadata fields changed, title and body edits). Read-only — to roll back, take the text from an entry and call `update_note`.",
     {

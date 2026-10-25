@@ -5,6 +5,7 @@ import {
   buildNoteTagContent,
   buildResourceContent,
   buildTagContent,
+  MalformedItemContentError,
   parseJoplinContent,
   parseRawJson,
 } from "./content.js";
@@ -59,9 +60,15 @@ describe("parseRawJson", () => {
     expect(json.icon).toBe(icon);
   });
 
-  it("returns an empty object when the content is empty or not JSON", () => {
+  it("returns an empty object for empty content", () => {
     expect(parseRawJson(null)).toEqual({});
-    expect(parseRawJson("Title\n\nBody")).toEqual({});
+  });
+
+  it("rejects content that is not a JSON object instead of fabricating one", () => {
+    expect(() => parseRawJson("Title\n\nBody")).toThrow(MalformedItemContentError);
+    expect(() => parseRawJson('"a string"')).toThrow(MalformedItemContentError);
+    expect(() => parseRawJson("[]")).toThrow(MalformedItemContentError);
+    expect(() => parseRawJson("null")).toThrow(MalformedItemContentError);
   });
 });
 
