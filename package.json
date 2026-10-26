@@ -52,11 +52,11 @@
     "validate": "npm run qa && npm run typecheck && npm run test:coverage && npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "pg": "^8.13.0",
-    "zod": "^3.23.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
@@ -65,7 +65,7 @@
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
     "@vitest/coverage-v8": "5.0.5",
-    "markdownlint-cli2": "0.23.1",
+    "markdownlint-cli2": "0.23.3",
     "prettier": "3.9.6",
     "typescript": "^5.7.0",
     "vitest": "5.0.5"
