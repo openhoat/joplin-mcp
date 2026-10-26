@@ -112,8 +112,26 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     expect(body.result.protocolVersion).toBeTruthy();
 
     const listed = await mcp.request({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    const tools = (await listed.json()) as { result: { tools: Array<{ name: string }> } };
+    const tools = (await listed.json()) as {
+      result: { tools: Array<{ name: string; annotations?: Record<string, unknown> }> };
+    };
     expect(tools.result.tools.length).toBe(37);
+
+    // Hosts rely on the four behaviour hints to warn before a call: a missing or
+    // non-boolean hint is a directory rejection (OpenAI) or a silent risk.
+    const hints = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const;
+    for (const tool of tools.result.tools) {
+      for (const hint of hints) {
+        expect(typeof tool.annotations?.[hint], `${tool.name}.${hint}`).toBe("boolean");
+      }
+    }
+    const annotations = new Map(tools.result.tools.map((tool) => [tool.name, tool.annotations ?? {}]));
+    expect(annotations.get("get_note")?.readOnlyHint).toBe(true);
+    expect(annotations.get("list_trash")?.readOnlyHint).toBe(true);
+    expect(annotations.get("delete_note")?.destructiveHint).toBe(true);
+    expect(annotations.get("delete_tag")?.destructiveHint).toBe(true);
+    expect(annotations.get("create_note")?.idempotentHint).toBe(false);
+    expect(annotations.get("update_note")?.destructiveHint).toBe(false);
   });
 
   it("creates nested notebooks and returns them as a tree", async () => {
@@ -126,6 +144,10 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     expectText(sub, "Sub-notebook of:");
     state.subNotebook = itemId(sub.text);
     created.push(state.subNotebook);
+
+    // The flat list and the name search both reach the new notebooks.
+    expectText(await mcp.call("list_notebooks"), `**${prefix}-nb** (ID: ${state.notebook})`);
+    expectText(await mcp.call("search_notebooks", { query: `${prefix}-sub` }), `Found 1 notebook(s) for '${prefix}-sub'`);
 
     const tree = await mcp.call("get_notebook_tree");
     expectText(tree, `${prefix}-nb`);
@@ -146,6 +168,22 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     expect(byId.get(state.subNotebook)?.jop_parent_id).toBe(byId.get(state.notebook)?.jop_id);
     expect(await count("SELECT count(*)::int AS count FROM user_items WHERE item_id = $1", [state.notebook])).toBe(1);
     expect(await changes(state.notebook)).toEqual([{ type: 1, item_type: 1 }]);
+
+    expectText(
+      await mcp.call("update_notebook", { notebook_id: state.subNotebook, title: `${prefix}-sub2`, icon: { emoji: "🤖", name: "robot" } }),
+      `Title: ${prefix}-sub → ${prefix}-sub2`,
+    );
+    expectText(await mcp.call("get_notebook_tree"), `${prefix}-sub2`);
+
+    // Un-nest, then nest again: the hierarchy is a column write, the titles are untouched.
+    expectText(
+      await mcp.call("move_notebook", { notebook_id: state.subNotebook, parent_id: "" }),
+      `Notebook moved: **${prefix}-sub2**\nTo: root`,
+    );
+    expectText(
+      await mcp.call("move_notebook", { notebook_id: state.subNotebook, parent_id: state.notebook }),
+      `Notebook moved: **${prefix}-sub2**\nTo: ${prefix}-nb`,
+    );
   });
 
   it("creates, reads and updates a note", async () => {
@@ -155,6 +193,8 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     created.push(state.note);
 
     expectText(await mcp.call("get_note", { note_id: state.note }), `Notebook: ${prefix}-nb`);
+    expectText(await mcp.call("get_recent_notes", {}), `**${prefix}-note** (ID: ${state.note})`);
+    expectText(await mcp.call("list_notes_in_notebook", { notebook_id: state.notebook }), `Notebook "${prefix}-nb" - 1 note(s):`);
 
     const afterCreate = await itemRow(state.note);
     expect(afterCreate.jop_type).toBe(1);
@@ -173,6 +213,18 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     expect(noteChanges).toHaveLength(2);
     expect(noteChanges).toContainEqual({ type: 1, item_type: 2 });
     expect(noteChanges).toContainEqual({ type: 2, item_type: 1 });
+
+    // Moving the note out of its notebook and back: only the parent changes.
+    expectText(
+      await mcp.call("move_note", { note_id: state.note, target_notebook_id: state.subNotebook }),
+      `Note moved: **${prefix}-note-2**\nTo notebook: ${prefix}-sub2`,
+    );
+    expectText(await mcp.call("get_note", { note_id: state.note }), `Notebook: ${prefix}-sub2`);
+    expectText(
+      await mcp.call("move_note", { note_id: state.note, target_notebook_id: state.notebook }),
+      `Note moved: **${prefix}-note-2**\nTo notebook: ${prefix}-nb`,
+    );
+    expectText(await mcp.call("get_note", { note_id: state.note }), `Notebook: ${prefix}-nb`);
   });
 
   it("drives a todo from open to done", async () => {
@@ -211,6 +263,7 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     created.push(state.resource);
 
     expectText(await mcp.call("list_note_attachments", { note_id: state.note }), "Attachments (1):");
+    expectText(await mcp.call("list_resources", { query: prefix }), `**${prefix}.txt** (ID: ${state.resource})`);
     expectText(await mcp.call("get_resource", { resource_id: state.resource }), "Size: 5 B");
     expectText(await mcp.call("download_resource", { resource_id: state.resource }), Buffer.from("hello").toString("base64"));
 
@@ -255,6 +308,8 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     state.tag = itemId(tag.text);
     created.push(state.tag);
 
+    expectText(await mcp.call("list_tags"), `**${prefix}-tag** (ID: ${state.tag}) - 0 note(s)`);
+
     const noteJopId = String((await db.query("SELECT jop_id FROM items WHERE id = $1", [state.note])).rows[0].jop_id);
     const relations = async (): Promise<Array<Record<string, unknown>>> => {
       const result = await db.query("SELECT content FROM items WHERE jop_type = 6 AND encode(content, 'escape') LIKE $1", [
@@ -280,6 +335,32 @@ describe.skipIf(!config)("joplin-mcp against a real stack", () => {
     expect(await activeRelations()).toBe(0);
     expect((await relations()).length).toBeGreaterThan(0);
     expectText(await mcp.call("get_note_history", { note_id: state.note }), "No server history for");
+  });
+
+  it("lists the notes flagged as sync conflicts", async () => {
+    // No tool writes the flag: Joplin sets `is_conflict` in the note body when a
+    // sync clash happens. Flip it through SQL, assert the read, then unset it.
+    const readBody = async (): Promise<Record<string, unknown>> =>
+      JSON.parse(
+        String((await db.query("SELECT convert_from(content, 'UTF8') AS body FROM items WHERE id = $1", [state.note])).rows[0].body),
+      );
+    const writeBody = async (body: Record<string, unknown>): Promise<void> => {
+      await db.query("UPDATE items SET content = convert_to($2, 'UTF8') WHERE id = $1", [state.note, JSON.stringify(body)]);
+    };
+
+    const body = await readBody();
+    body.is_conflict = 1;
+    await writeBody(body);
+    try {
+      const conflicted = await mcp.call("list_conflicted_notes", {});
+      expectText(conflicted, "Notes in conflict (1):");
+      expectText(conflicted, `**${prefix}-note-2**\n   ID: ${state.note}`);
+    } finally {
+      delete body.is_conflict;
+      await writeBody(body);
+    }
+
+    expectText(await mcp.call("list_conflicted_notes", {}), "No note in conflict.");
   });
 
   it("refuses the calls that would lose data", async () => {
