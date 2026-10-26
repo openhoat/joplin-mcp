@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-10-26
+
+### Added
+
+- Every tool now declares the four behaviour hints (`readOnlyHint`, `destructiveHint`,
+  `idempotentHint`, `openWorldHint`) through explicit presets in `defineTool`: the OpenAI app
+  directory rejects tools where a hint is missing or not a boolean, and clients can warn before a
+  destructive call. `defineTool` takes the annotations as a mandatory argument, so a new tool
+  cannot ship without them.
+
+### Fixed
+
+- `@modelcontextprotocol/sdk` 1.29.0 → 1.32.2, which closes five advisories it shipped with: server
+  bearer authentication accepting tokens issued for another service, one HTTP request within the
+  default size limit exhausting memory during validation, experimental tasks not bound to the
+  session that created them, and two OAuth/redirect issues on the client side.
+- `zod` 3.x → 4.6.7 (memory exhaustion while validating oversized constrained collections, fixed in
+  4.6.6), `qs` and `markdownlint-cli2` bumped by the audit pass. The tool schemas use
+  `z.object(shape).strict()` and `z.enum` only, so the major upgrade needed no handler change.
+
+### Tests
+
+- End-to-end: the run now references all 37 tools, up from 27 — `list_resources`,
+  `list_notebooks`, `search_notebooks`, `list_notes_in_notebook`, `get_recent_notes`,
+  `update_notebook`, `move_notebook`, `move_note`, `list_tags` and `list_conflicted_notes`. The
+  conflict case flips `is_conflict` through SQL, the only writer of that flag being a client sync.
+- End-to-end: `tools/list` asserts that all four hints are booleans on every tool and spot-checks
+  the read-only, destructive and idempotent classification.
+
 ## [1.13.0] - 2026-10-25
 
 ### Changed
@@ -211,6 +240,9 @@ All notable changes to this project are documented in this file. The format foll
 
 - Imported from the `docker-stacks` monorepo into a dedicated repository, unchanged.
 
+[1.14.0]: https://github.com/openhoat/joplin-mcp/compare/v1.13.0...v1.14.0
+[1.13.0]: https://github.com/openhoat/joplin-mcp/compare/v1.12.0...v1.13.0
+[1.12.0]: https://github.com/openhoat/joplin-mcp/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/openhoat/joplin-mcp/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/openhoat/joplin-mcp/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/openhoat/joplin-mcp/compare/v1.9.0...v1.9.1
