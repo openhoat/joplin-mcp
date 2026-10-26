@@ -197,6 +197,12 @@ History is written by Joplin Server on client syncs. The MCP server writes rows 
 created through it has no history until a client saves it; restoring a version is left to
 `update_note` on purpose.
 
+Every tool declares the four behaviour hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`,
+`openWorldHint`): reads are read-only and idempotent, creates are not idempotent, edits are
+idempotent and non-destructive, and the `delete_*` family is destructive. `openWorldHint` is always
+`true` because the Joplin database is shared with the other clients. Hosts can warn before a
+call, and directories that reject tools with a missing or non-boolean hint accept all of them.
+
 ## HTTP endpoints
 
 | Endpoint                        | Method          | Purpose                                          |

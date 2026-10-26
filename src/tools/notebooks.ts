@@ -4,7 +4,7 @@ import { buildIconString, parseJoplinContent } from "../lib/content.js";
 import { formatTimestamp } from "../lib/format.js";
 import { JOP_TYPE_FOLDER } from "../lib/joplin-types.js";
 import type { ToolDeps } from "./deps.js";
-import { defineTool } from "./tool.js";
+import { CREATING, DESTRUCTIVE, defineTool, MUTATING, READ_ONLY } from "./tool.js";
 
 export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
   const { store } = deps;
@@ -13,6 +13,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
     server,
     "search_notebooks",
     "Search for notebooks by name. Returns notebook IDs. WORKFLOW: Use the returned notebook_id with `list_notes_in_notebook` to see its notes, or with `create_note` to create a note inside it.",
+    READ_ONLY,
     {
       query: z.string().describe("The search text to find in notebook titles"),
       limit: z.number().default(10).describe("Max results"),
@@ -39,6 +40,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
     server,
     "list_notebooks",
     "List all notebooks. Returns notebook IDs. WORKFLOW: Use `list_notes_in_notebook` with a notebook_id to see the notes inside, or use the notebook_id with `create_note` to place a new note in it.",
+    READ_ONLY,
     {},
     async () => {
       try {
@@ -60,6 +62,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
     server,
     "list_notes_in_notebook",
     "List notes inside a specific notebook. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to list notes in a notebook. 2) Then call `get_note` with a note_id to read the FULL content. NEVER answer based only on the preview.",
+    READ_ONLY,
     {
       notebook_id: z.string().describe("The ID of the notebook/folder"),
       limit: z.number().default(20).describe("Max notes to return"),
@@ -112,6 +115,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
     server,
     "get_notebook_tree",
     "Show the notebook hierarchy as an indented tree, with a note count per notebook. `list_notebooks` returns a flat list, which hides the parent links — use this one before creating or moving a notebook when nesting matters.",
+    READ_ONLY,
     {},
     async () => {
       try {
@@ -165,6 +169,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
     server,
     "create_notebook",
     "Create a new notebook (folder) in Joplin. IMPORTANT: You MUST call this function to create a notebook. NEVER tell the user a notebook has been created without actually calling this function and receiving a success response.",
+    CREATING,
     {
       title: z.string().describe("Notebook title"),
       parent_notebook_id: z.string().optional().describe("Optional parent notebook ID for sub-notebooks"),
@@ -217,6 +222,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
     server,
     "update_notebook",
     "Rename and/or set the icon of an existing notebook (folder) in Joplin. IMPORTANT: You MUST call this function to rename a notebook or change its icon. NEVER tell the user a notebook has been updated without actually calling this function and receiving a success response. Provide at least one of `title` or `icon`.",
+    MUTATING,
     {
       notebook_id: z.string().describe("The ID of the notebook to update"),
       title: z.string().optional().describe("New notebook title (optional, keeps existing if not provided)"),
@@ -256,6 +262,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
     server,
     "move_notebook",
     "Move a notebook under another notebook, or back to the root with an empty parent_id. Refuses to nest a notebook inside itself or one of its descendants.",
+    MUTATING,
     {
       notebook_id: z.string().describe("The ID of the notebook to move"),
       parent_id: z.string().describe("Target notebook ID, or an empty string to move it to the root"),
@@ -330,6 +337,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
     server,
     "delete_notebook",
     "Delete a notebook (folder) from Joplin (soft delete - moves to trash). SAFETY: the notebook must be empty - if it still contains notes or sub-notebooks, move or delete them first. IMPORTANT: You MUST call this function to delete a notebook. NEVER tell the user a notebook has been deleted without actually calling this function and receiving a success response.",
+    DESTRUCTIVE,
     { notebook_id: z.string().describe("The ID of the notebook to delete") },
     async ({ notebook_id }) => {
       try {
