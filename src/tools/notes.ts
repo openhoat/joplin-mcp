@@ -5,7 +5,7 @@ import { formatTimestamp } from "../lib/format.js";
 import { CHANGE_DELETED, CHANGE_UPDATED, JOP_TYPE_FOLDER, JOP_TYPE_NOTE, type JoplinItemRow } from "../lib/joplin-types.js";
 import { parseDueDate } from "../lib/todo.js";
 import type { ToolDeps } from "./deps.js";
-import { CREATING, DESTRUCTIVE, defineTool, MUTATING, READ_ONLY } from "./tool.js";
+import { defineTool } from "./tool.js";
 
 export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
   const { store } = deps;
@@ -14,7 +14,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     server,
     "search_notes",
     "Search notes by title or body content. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to find notes. 2) Then call `get_note` with the note_id to read the FULL content. NEVER answer questions about note content based only on the preview - always call `get_note` first.",
-    READ_ONLY,
+    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       query: z.string().describe("The search text"),
       notebook_id: z.string().optional().describe("Optional notebook ID to filter search within"),
@@ -61,7 +61,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     server,
     "get_note",
     "Read the FULL content of a specific Joplin note. ALWAYS call this before answering questions about a note's content. Use after `search_notes` or `get_recent_notes` to get the complete text from a note_id. This returns the entire note body without truncation.",
-    READ_ONLY,
+    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     { note_id: z.string().describe("The ID of the note") },
     async ({ note_id }) => {
       try {
@@ -85,7 +85,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     server,
     "get_recent_notes",
     "Get the most recently updated notes. Returns note IDs with SHORT PREVIEWS only. WORKFLOW: 1) Call this to find recent notes. 2) Then call `get_note` with the note_id to read the FULL content. NEVER answer questions about note content based only on the preview.",
-    READ_ONLY,
+    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       limit: z.number().default(10).describe("Max notes"),
       notebook_id: z.string().optional().describe("Optional notebook ID to filter"),
@@ -131,7 +131,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     server,
     "list_todos",
     "List the todos (notes carrying a checkbox): open ones, completed ones or both, optionally scoped to a notebook, sorted by due date. In Joplin a reminder is a todo with a `todo_due` date — there is no separate alarm item.",
-    READ_ONLY,
+    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       status: z.enum(["open", "done", "all"]).default("open").describe("Which todos to list: not completed, completed, or both"),
       notebook_id: z.string().optional().describe("Restrict the listing to one notebook"),
@@ -198,7 +198,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     server,
     "create_note",
     "Create a new note in Joplin. IMPORTANT: You MUST call this function to create a note. NEVER tell the user a note has been created without actually calling this function and receiving a success response. The note text goes in `body` (Markdown); unknown fields are rejected. Use `search_notebooks` or `list_notebooks` first to find the notebook_id if the user specifies a notebook.",
-    CREATING,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     {
       title: z.string().describe("Note title"),
       body: z.string().describe("Note body in Markdown"),
@@ -257,7 +257,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     server,
     "update_note",
     "Update an existing note's title and/or body. IMPORTANT: You MUST call this function to update a note. NEVER tell the user a note has been updated without actually calling this function and receiving a success response. WORKFLOW: 1) Use `search_notes` or `get_note` to find the note_id. 2) Call `update_note` with that note_id and the fields to change: `body` for the Markdown body, `title` for the title. Unknown fields are rejected. The note_id is REQUIRED and must come from a previous search.",
-    MUTATING,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       note_id: z.string().describe("REQUIRED: The ID of the note to update (from search_notes or get_note)"),
       title: z.string().optional().describe("New title (optional, keeps existing if not provided)"),
@@ -333,7 +333,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     server,
     "delete_note",
     "Delete a note from Joplin (soft delete - moves to trash). IMPORTANT: You MUST call this function to delete a note. NEVER tell the user a note has been deleted without actually calling this function and receiving a success response. Deleted notes are filtered from search results automatically.",
-    DESTRUCTIVE,
+    { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     { note_id: z.string().describe("The ID of the note to delete") },
     async ({ note_id }) => {
       try {
@@ -372,7 +372,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
     server,
     "move_note",
     "Move a note to a different notebook. IMPORTANT: You MUST call this function to move a note. NEVER tell the user a note has been moved without actually calling this function. Use `search_notes` to find the note_id and `search_notebooks` to find the target_notebook_id.",
-    MUTATING,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       note_id: z.string().describe("The ID of the note to move"),
       target_notebook_id: z.string().describe("The ID of the destination notebook/folder"),

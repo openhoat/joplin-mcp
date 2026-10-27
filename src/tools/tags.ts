@@ -4,7 +4,7 @@ import { parseJoplinContent, parseRawJson } from "../lib/content.js";
 import { formatTimestamp } from "../lib/format.js";
 import { JOP_TYPE_NOTE, JOP_TYPE_TAG, type JoplinItemRow } from "../lib/joplin-types.js";
 import type { ToolDeps } from "./deps.js";
-import { CREATING, DESTRUCTIVE, defineTool, MUTATING, READ_ONLY } from "./tool.js";
+import { defineTool } from "./tool.js";
 
 export function registerTagTools(server: McpServer, deps: ToolDeps): void {
   const { store } = deps;
@@ -13,7 +13,7 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     server,
     "list_tags",
     "List all Joplin tags with their note counts. Use the returned tag ID with `attach_tag_to_note` / `detach_tag_from_note`.",
-    READ_ONLY,
+    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {},
     async () => {
       try {
@@ -49,7 +49,7 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     server,
     "add_tag",
     "Create a new Joplin tag. Returns the tag ID for `attach_tag_to_note`.",
-    CREATING,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     { title: z.string().describe("Tag title") },
     async ({ title }) => {
       try {
@@ -71,7 +71,7 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     server,
     "list_note_tags",
     "List the tags assigned to a note.",
-    READ_ONLY,
+    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     { note_id: z.string().describe("The ID of the note") },
     async ({ note_id }) => {
       try {
@@ -101,7 +101,7 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     server,
     "attach_tag_to_note",
     "Assign a tag to a note. Creates the note<->tag relation item used by Joplin sync; no-op if the tag is already assigned.",
-    MUTATING,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       note_id: z.string().describe("The ID of the note"),
       tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
@@ -141,7 +141,7 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     server,
     "detach_tag_from_note",
     "Remove a tag from a note (soft-deletes the note<->tag relation item). The tag itself is kept.",
-    MUTATING,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       note_id: z.string().describe("The ID of the note"),
       tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
@@ -181,7 +181,7 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     server,
     "list_notes_with_tag",
     "List the notes carrying a tag, most recently updated first (resolves the note<->tag relations used by Joplin sync).",
-    READ_ONLY,
+    { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
       limit: z.number().default(50).describe("Max notes to return"),
@@ -235,7 +235,7 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     server,
     "rename_tag",
     "Rename a tag. The tag id is kept, so every note assignment survives.",
-    MUTATING,
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     {
       tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)"),
       title: z.string().describe("New tag title"),
@@ -276,7 +276,7 @@ export function registerTagTools(server: McpServer, deps: ToolDeps): void {
     server,
     "delete_tag",
     "Delete a tag: trashes the tag and all its note assignments (soft delete, same as the desktop). The notes themselves are never touched.",
-    DESTRUCTIVE,
+    { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     { tag_id: z.string().describe("The tag ID (MCP id or Joplin 32-hex id)") },
     async ({ tag_id }) => {
       try {
