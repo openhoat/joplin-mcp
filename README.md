@@ -15,7 +15,7 @@ history — 37 tools over the Model Context Protocol, one container, one databas
 [![CI](https://github.com/openhoat/joplin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/openhoat/joplin-mcp/actions/workflows/ci.yml)
 [![node: 20+](https://img.shields.io/badge/node-20%2B-green.svg)](Dockerfile)
 [![MCP: streamable-http](https://img.shields.io/badge/MCP-streamable--http-8A2BE2.svg)](https://modelcontextprotocol.io)
-[![M8ven Verified](https://m8ven.ai/badge/mcp/openhoat-joplin-mcp-1uoqwj?variant=verified)](https://m8ven.ai/mcp/openhoat-joplin-mcp-1uoqwj?s=readme)
+[![M8ven Score](https://m8ven.ai/badge/mcp/openhoat/joplin-mcp)](https://m8ven.ai/mcp/openhoat/joplin-mcp?s=readme)
 
 ## Why not the Joplin API?
 
