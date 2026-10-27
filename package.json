@@ -1,6 +1,6 @@
 {
   "name": "joplin-mcp-server",
-  "version": "1.14.0",
+  "version": "1.14.1",
   "description": "MCP server for Joplin — notes, notebooks, todos, attachments, tags and trash through the Joplin Server PostgreSQL database.",
   "keywords": [
     "mcp",

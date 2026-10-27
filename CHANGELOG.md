@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.1] - 2026-10-27
+
+### Fixed
+
+- The four behaviour hints are now written as literals at each tool declaration instead of being passed
+  through shared constants in `defineTool`. Nothing changes at runtime (the `tools/list` response was
+  already complete), but directory scanners and reviewers read the declaration site: a hint they cannot
+  see there counts as missing, which is what M8ven reported as "37/37 tools missing one or more hints".
+
 ## [1.14.0] - 2026-10-26
 
 ### Added
@@ -240,6 +249,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - Imported from the `docker-stacks` monorepo into a dedicated repository, unchanged.
 
+[1.14.1]: https://github.com/openhoat/joplin-mcp/compare/v1.14.0...v1.14.1
 [1.14.0]: https://github.com/openhoat/joplin-mcp/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/openhoat/joplin-mcp/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/openhoat/joplin-mcp/compare/v1.11.0...v1.12.0

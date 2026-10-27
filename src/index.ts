@@ -29,7 +29,7 @@ import { registerNoteTools } from "./tools/notes.js";
 import { registerTagTools } from "./tools/tags.js";
 import { registerTrashTools } from "./tools/trash.js";
 
-const VERSION = "1.14.0";
+const VERSION = "1.14.1";
 
 function createMcpServer(deps: ToolDeps): McpServer {
   const server = new McpServer({ name: "joplin", version: VERSION });
