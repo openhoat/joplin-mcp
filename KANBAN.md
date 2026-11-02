@@ -5,6 +5,19 @@ lives in [CHANGELOG.md](CHANGELOG.md) and `git log`.
 
 ## Backlog
 
+### #8 [SECURITY] Read-only API key for server-side write protection
+
+- [ ] second bearer (`MCP_API_KEY_RO`, empty = disabled, keeping the fail-closed posture): tools
+      annotated `readOnlyHint: false` (20 of 37) and `POST /files` reject with a clear error
+- [ ] derive the gate from the existing tool annotations instead of a hand-written list;
+      `stack.e2e.test.ts` already pins the annotations
+- [ ] document `MCP_API_KEY_RO` in the README (same env-var table as the other settings)
+- [ ] known limit, to state in the docs: opencode cannot pick a key per agent, so plan mode keeps
+      its client-side permissions; this key targets other clients and manual mistakes
+- [ ] the gate lives server-side by design: the spec treats tool annotations as untrusted input
+      (clients MUST consider them untrusted unless the server is trusted), so no client-side
+      strategy can be relied upon
+
 ### #7 [TEST] Handler-level tests on a fake store
 
 - [ ] the store seam exists (`src/store/index.ts`), so a tool module can now run against an in-memory
