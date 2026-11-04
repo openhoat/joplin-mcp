@@ -37,6 +37,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
             const isTruncated = parsed.body.length > 200;
             return {
               id: row.id,
+              clientId: row.jop_id,
               title: parsed.title,
               preview: isTruncated ? parsed.body.substring(0, 200) : parsed.body,
               isTruncated,
@@ -48,7 +49,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
         if (notes.length === 0) return { content: [{ type: "text" as const, text: `No note found for '${query}'.` }] };
         const lines = notes.map(
           (n: any) =>
-            `**${n.title}** (ID: ${n.id})\n   Updated: ${n.updated}\n   Preview: ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
+            `**${n.title}** (ID: ${n.id})\n   Client ID: ${n.clientId}\n   Updated: ${n.updated}\n   Preview: ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
         );
         return { content: [{ type: "text" as const, text: `Found ${notes.length} note(s) for '${query}':\n\n${lines.join("\n\n")}` }] };
       } catch (e: any) {
@@ -60,7 +61,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
   defineTool(
     server,
     "get_note",
-    "Read the FULL content of a specific Joplin note. ALWAYS call this before answering questions about a note's content. Use after `search_notes` or `get_recent_notes` to get the complete text from a note_id. This returns the entire note body without truncation.",
+    "Read the FULL content of a specific Joplin note. ALWAYS call this before answering questions about a note's content. Use after `search_notes` or `get_recent_notes` to get the complete text from a note_id. This returns the entire note body without truncation. The header carries two ids: the MCP id, which every tool accepts as note_id, and the Client ID (32 hex), the only one a Joplin internal link resolves - `[title](:/<client ID>)`.",
     { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     { note_id: z.string().describe("The ID of the note") },
     async ({ note_id }) => {
@@ -73,7 +74,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
         const notebookName = row.jop_parent_id ? (await store.findFolderTitle(userId, String(row.jop_parent_id))) || "" : "";
         let text = `**${parsed.title}**\n`;
         if (notebookName) text += `Notebook: ${notebookName}\n`;
-        text += `Updated: ${formatTimestamp(row.updated_time)}\nID: ${row.id}\n\n--- Content ---\n\n${parsed.body}`;
+        text += `Updated: ${formatTimestamp(row.updated_time)}\nID: ${row.id}\nClient ID: ${row.jop_id}\n\n--- Content ---\n\n${parsed.body}`;
         return { content: [{ type: "text" as const, text }] };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
@@ -107,6 +108,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
             const isTruncated = parsed.body.length > 100;
             return {
               id: row.id,
+              clientId: row.jop_id,
               title: parsed.title,
               preview: isTruncated ? parsed.body.substring(0, 100) : parsed.body,
               isTruncated,
@@ -118,7 +120,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
         if (notes.length === 0) return { content: [{ type: "text" as const, text: "No notes found." }] };
         const lines = notes.map(
           (n: any) =>
-            `**${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
+            `**${n.title}** (ID: ${n.id})\n   Client ID: ${n.clientId}\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
         );
         return { content: [{ type: "text" as const, text: `Recent notes (${notes.length}):\n\n${lines.join("\n\n")}` }] };
       } catch (e: any) {
@@ -153,6 +155,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
             const json = parseRawJson(row.content);
             return {
               id: row.id,
+              clientId: row.jop_id,
               title: String(json.title || "(untitled)"),
               isTodo: Number(json.is_todo || 0) === 1,
               deleted: Number(json.deleted_time || 0) > 0,
@@ -182,7 +185,7 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
             t.due > 0 ? `due ${formatTimestamp(t.due)}` : "",
             t.completed > 0 ? `completed ${formatTimestamp(t.completed)}` : "",
           ].filter(Boolean);
-          return `${t.completed > 0 ? "[x]" : "[ ]"} **${t.title}**${parts.length ? ` · ${parts.join(" · ")}` : ""}\n   ID: ${t.id}${t.notebook ? ` · notebook: ${t.notebook}` : ""}`;
+          return `${t.completed > 0 ? "[x]" : "[ ]"} **${t.title}**${parts.length ? ` · ${parts.join(" · ")}` : ""}\n   ID: ${t.id} · client ID: ${t.clientId}${t.notebook ? ` · notebook: ${t.notebook}` : ""}`;
         });
         const header = status === "done" ? "completed" : status === "open" ? "open" : "all";
         return {
@@ -246,7 +249,14 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
         if (parentJopId) {
           notebookLabel = (await store.findFolderTitle(userId, parentJopId)) || parentJopId;
         }
-        return { content: [{ type: "text" as const, text: `Note created: **${title}**\nID: ${note.id}\nNotebook: ${notebookLabel}` }] };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Note created: **${title}**\nID: ${note.id}\nClient ID: ${note.jopId}\nNotebook: ${notebookLabel}`,
+            },
+          ],
+        };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
       }
@@ -322,7 +332,9 @@ export function registerNoteTools(server: McpServer, deps: ToolDeps): void {
           const done = Number(extra.todo_completed || 0);
           return `\nTodo · due: ${due > 0 ? formatTimestamp(due) : "none"} · ${done > 0 ? `completed ${formatTimestamp(done)}` : "open"}`;
         })();
-        return { content: [{ type: "text" as const, text: `Note updated: **${newTitle}**\nID: ${note_id}${todoLine}` }] };
+        return {
+          content: [{ type: "text" as const, text: `Note updated: **${newTitle}**\nID: ${note_id}\nClient ID: ${row.jop_id}${todoLine}` }],
+        };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
       }

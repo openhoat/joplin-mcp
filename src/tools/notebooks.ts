@@ -87,6 +87,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
             const isTruncated = parsed.body.length > 100;
             return {
               id: row.id,
+              clientId: row.jop_id,
               title: parsed.title,
               preview: isTruncated ? parsed.body.substring(0, 100) : parsed.body,
               isTruncated,
@@ -98,7 +99,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
         if (notes.length === 0) return { content: [{ type: "text" as const, text: `Notebook "${folderParsed.title}" has no notes.` }] };
         const lines = notes.map(
           (n: any) =>
-            `**${n.title}** (ID: ${n.id})\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
+            `**${n.title}** (ID: ${n.id})\n   Client ID: ${n.clientId}\n   ${n.updated} - ${n.preview}${n.isTruncated ? "\n   Preview truncated: call get_note with this ID to read the whole note" : ""}`,
         );
         return {
           content: [

@@ -47,7 +47,7 @@ export function createNoteStore(pool: Pool, core: Core): NoteStore {
       }
       values.push(Math.min(params.limit, 50));
       const result = await pool.query(
-        `SELECT i.id, i.content, i.updated_time FROM items i
+        `SELECT i.id, i.jop_id, i.content, i.updated_time FROM items i
          WHERE ${conditions.join(" AND ")}
          ORDER BY i.updated_time DESC LIMIT $${values.length}`,
         values,
@@ -59,12 +59,12 @@ export function createNoteStore(pool: Pool, core: Core): NoteStore {
       const result =
         params.parentJopId !== undefined
           ? await pool.query(
-              `SELECT i.id, i.content, i.updated_time FROM items i
+              `SELECT i.id, i.jop_id, i.content, i.updated_time FROM items i
                WHERE i.owner_id = $1 AND i.jop_type = $2 AND i.jop_parent_id = $3 ORDER BY i.updated_time DESC LIMIT $4`,
               [userId, JOP_TYPE_NOTE, params.parentJopId, Math.min(params.limit, 50)],
             )
           : await pool.query(
-              `SELECT i.id, i.content, i.updated_time FROM items i
+              `SELECT i.id, i.jop_id, i.content, i.updated_time FROM items i
                WHERE i.owner_id = $1 AND i.jop_type = $2 ORDER BY i.updated_time DESC LIMIT $3`,
               [userId, JOP_TYPE_NOTE, Math.min(params.limit, 50)],
             );

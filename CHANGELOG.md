@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-11-04
+
+### Added
+
+- Note answers now carry the **client ID** (the 32-hex `jop_id`) beside the MCP id. A Joplin internal
+  link only resolves on that id (`[title](:/<client ID>)`); the base62 MCP id is accepted by every
+  tool but does nothing in the desktop client, and the two were indistinguishable for a caller, so a
+  note link built from a tool answer was dead on arrival. Covers `search_notes`, `get_recent_notes`,
+  `list_notes_in_notebook`, `list_todos`, `get_note`, `create_note` and `update_note`.
+
 ## [1.14.1] - 2026-10-27
 
 ### Fixed
