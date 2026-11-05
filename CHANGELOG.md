@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.1] - 2026-11-05
+
+### Fixed
+
+- The server announced version `1.14.1` while package.json said `1.16.0`: the version was a hardcoded
+  constant in `src/index.ts` that `npm version` never touched, so it stayed behind through the 1.15
+  and 1.16 releases. It is now read from package.json at startup (`readPackageVersion`), which removes
+  the drift instead of remembering to bump a second place. The end-to-end suite compared the two and
+  failed in CI; a unit test now fails earlier, without a stack.
+
 ## [1.16.0] - 2026-11-05
 
 ### Added
@@ -275,6 +285,9 @@ All notable changes to this project are documented in this file. The format foll
 
 - Imported from the `docker-stacks` monorepo into a dedicated repository, unchanged.
 
+[1.16.1]: https://github.com/openhoat/joplin-mcp/compare/v1.16.0...v1.16.1
+[1.16.0]: https://github.com/openhoat/joplin-mcp/compare/v1.15.0...v1.16.0
+[1.15.0]: https://github.com/openhoat/joplin-mcp/compare/v1.14.1...v1.15.0
 [1.14.1]: https://github.com/openhoat/joplin-mcp/compare/v1.14.0...v1.14.1
 [1.14.0]: https://github.com/openhoat/joplin-mcp/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/openhoat/joplin-mcp/compare/v1.12.0...v1.13.0
