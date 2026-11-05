@@ -2,3 +2,4 @@ CHANGELOG.md
 node_modules/
 dist/
 coverage/
+.opencode/

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.git/
+.gitignore
+.idea/
+.opencode/
+.vitest/
+buildx-config.toml
+compose*.yml
+*.md
+docs/
+.github/

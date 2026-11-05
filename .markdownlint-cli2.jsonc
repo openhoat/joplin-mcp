@@ -7,5 +7,5 @@
     "MD041": false,
     "MD060": { "style": "aligned" }
   },
-  "globs": ["**/*.md", "!node_modules/**", "!dist/**", "!coverage/**"]
+  "globs": ["**/*.md", "!node_modules/**", "!dist/**", "!coverage/**", "!.opencode/**"]
 }
