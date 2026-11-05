@@ -19,6 +19,7 @@ import { MAX_UPLOAD_BYTES, MCP_JSON_LIMIT, readServerConfig } from "./config.js"
 import { JOP_TYPE_NOTE, JOP_TYPE_RESOURCE } from "./lib/joplin-types.js";
 import { buildResourceLink } from "./lib/markdown.js";
 import { resourceSummary } from "./lib/resource.js";
+import { readPackageVersion } from "./lib/version.js";
 import { createPool, readDbConfig } from "./store/connection.js";
 import { createStore, type Store } from "./store/index.js";
 import { registerAttachmentTools } from "./tools/attachments.js";
@@ -29,7 +30,7 @@ import { registerNoteTools } from "./tools/notes.js";
 import { registerTagTools } from "./tools/tags.js";
 import { registerTrashTools } from "./tools/trash.js";
 
-const VERSION = "1.14.1";
+const VERSION = readPackageVersion();
 
 function createMcpServer(deps: ToolDeps): McpServer {
   const server = new McpServer({ name: "joplin", version: VERSION });
