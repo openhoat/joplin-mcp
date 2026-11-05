@@ -22,6 +22,8 @@ export interface NotebookRow {
 
 export interface NoteRow {
   id: string;
+  /** 32-hex client id: the only id a Joplin internal link (`:/<id>`) resolves. */
+  jop_id: string;
   content: Buffer;
   updated_time: number;
 }
@@ -184,7 +186,7 @@ export function createNotebookStore(pool: Pool, core: Core): NotebookStore {
 
     async listNotesInFolder(parentJopId, limit) {
       const result = await pool.query(
-        `SELECT i.id, i.content, i.updated_time FROM items i
+        `SELECT i.id, i.jop_id, i.content, i.updated_time FROM items i
          WHERE i.jop_parent_id = $1 AND i.jop_type = $2
          ORDER BY i.updated_time DESC LIMIT $3`,
         [parentJopId, JOP_TYPE_NOTE, Math.min(limit, 50)],
