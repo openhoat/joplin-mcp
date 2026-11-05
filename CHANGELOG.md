@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-11-05
+
+### Added
+
+- Notebook listings now render the icon: `list_notebooks`, `search_notebooks` and `get_notebook_tree` end
+  each line with `icon: 🚗 (car)`, or `icon: none` when the notebook has no icon. Writing an icon
+  through `create_notebook`/`update_notebook` was possible while reading it back was not — the display
+  parser strips the nested `icon` field — so an icon could only be set or audited blind. The new reader
+  parses the JSON string stored in the folder `icon` field and degrades to "no icon" on a malformed
+  one instead of failing the listing.
+
+### Fixed
+
+- `list_notes_in_notebook` rendered `Client ID: undefined`: its query did not select `jop_id`, so the
+  id introduced in 1.15.0 never reached that listing and a note link built from it pointed nowhere.
+
 ## [1.15.0] - 2026-11-04
 
 ### Added
