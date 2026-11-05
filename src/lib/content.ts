@@ -112,6 +112,38 @@ export function buildIconString(icon: NotebookIcon): string {
 }
 
 /**
+ * Read the folder 'icon' field back: a JSON string inside the v3 content,
+ * empty or absent when the notebook carries no icon.
+ *
+ * Display path: a field that does not parse reads as "no icon" instead of
+ * failing the whole notebook listing, the same way `parseJoplinContent`
+ * degrades a malformed row. An icon without an emoji is not an icon.
+ */
+export function readNotebookIcon(raw: Buffer | string | null): NotebookIcon | null {
+  let outer: Record<string, any>;
+  try {
+    outer = parseRawJson(raw);
+  } catch {
+    return null;
+  }
+  const field = typeof outer.icon === "string" ? outer.icon.trim() : "";
+  if (!field) return null;
+  try {
+    const inner: unknown = JSON.parse(field);
+    if (!isJsonObject(inner)) return null;
+    const emoji = typeof inner.emoji === "string" ? inner.emoji : "";
+    if (!emoji) return null;
+    return {
+      emoji,
+      name: typeof inner.name === "string" ? inner.name : "",
+      type: typeof inner.type === "number" ? inner.type : 1,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build the Joplin v3 resource item content, mirroring the exact field set used by
  * the desktop client (verified against rows produced by a real sync).
  */

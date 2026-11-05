@@ -133,15 +133,15 @@ silently stripped, so a typo can never turn into a no-op that still answers succ
 
 ### Notebooks (7)
 
-| Tool                | Purpose                                                    |
-| ------------------- | ---------------------------------------------------------- |
-| `list_notebooks`    | Flat list of notebooks                                     |
-| `search_notebooks`  | Search notebooks by name                                   |
-| `get_notebook_tree` | Resolved hierarchy as an indented tree, with note counts   |
-| `create_notebook`   | Create a notebook (title, icon)                            |
-| `update_notebook`   | Rename and/or set the icon                                 |
-| `move_notebook`     | Move under another notebook or to the root, refuses cycles |
-| `delete_notebook`   | Soft delete, refuses a non-empty notebook                  |
+| Tool                | Purpose                                                              |
+| ------------------- | -------------------------------------------------------------------- |
+| `list_notebooks`    | Flat list of notebooks, each with its icon (`icon: none` when unset) |
+| `search_notebooks`  | Search notebooks by name, icon included                              |
+| `get_notebook_tree` | Resolved hierarchy as an indented tree, with note counts and icons   |
+| `create_notebook`   | Create a notebook (title, icon)                                      |
+| `update_notebook`   | Rename and/or set the icon (empty `emoji` clears it)                 |
+| `move_notebook`     | Move under another notebook or to the root, refuses cycles           |
+| `delete_notebook`   | Soft delete, refuses a non-empty notebook                            |
 
 ### Todos (1)
 

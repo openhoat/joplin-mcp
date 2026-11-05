@@ -8,6 +8,7 @@ import {
   MalformedItemContentError,
   parseJoplinContent,
   parseRawJson,
+  readNotebookIcon,
 } from "./content.js";
 
 describe("parseJoplinContent", () => {
@@ -95,6 +96,33 @@ describe("buildIconString", () => {
   it("always emits emoji, name and type as a compact JSON string", () => {
     expect(buildIconString({ emoji: "🏦" })).toBe('{"emoji":"🏦","name":"","type":1}');
     expect(buildIconString({ name: "bank", type: 2 })).toBe('{"emoji":"","name":"bank","type":2}');
+  });
+});
+
+describe("readNotebookIcon", () => {
+  it("reads back what buildIconString wrote", () => {
+    const raw = JSON.stringify({ title: "Redion", icon: buildIconString({ emoji: "🩺", name: "stethoscope" }) });
+    expect(readNotebookIcon(raw)).toEqual({ emoji: "🩺", name: "stethoscope", type: 1 });
+  });
+
+  it("returns null when the icon is empty, absent or not JSON", () => {
+    expect(readNotebookIcon(JSON.stringify({ title: "N", icon: "" }))).toBeNull();
+    expect(readNotebookIcon(JSON.stringify({ title: "N" }))).toBeNull();
+    expect(readNotebookIcon(JSON.stringify({ title: "N", icon: "not json" }))).toBeNull();
+    expect(readNotebookIcon(JSON.stringify({ title: "N", icon: JSON.stringify({ name: "no-emoji" }) }))).toBeNull();
+    expect(readNotebookIcon(null)).toBeNull();
+  });
+
+  it("tolerates a legacy non-JSON folder row instead of failing the listing", () => {
+    expect(readNotebookIcon("Legacy folder\n\nbody")).toBeNull();
+  });
+
+  it("defaults the type and the name when the stored icon omits them", () => {
+    expect(readNotebookIcon(JSON.stringify({ title: "N", icon: JSON.stringify({ emoji: "🐎" }) }))).toEqual({
+      emoji: "🐎",
+      name: "",
+      type: 1,
+    });
   });
 });
 

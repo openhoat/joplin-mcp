@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { buildIconString, parseJoplinContent } from "../lib/content.js";
-import { formatTimestamp } from "../lib/format.js";
+import { buildIconString, parseJoplinContent, readNotebookIcon } from "../lib/content.js";
+import { formatNotebookIcon, formatTimestamp } from "../lib/format.js";
 import { JOP_TYPE_FOLDER } from "../lib/joplin-types.js";
 import type { ToolDeps } from "./deps.js";
 import { defineTool } from "./tool.js";
@@ -25,7 +25,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
         if (rows.length === 0) return { content: [{ type: "text" as const, text: `No notebook found for '${query}'.` }] };
         const notebooks = rows.map((row: any) => {
           const parsed = parseJoplinContent(row.content);
-          return `**${parsed.title}** (ID: ${row.id})`;
+          return `**${parsed.title}** (ID: ${row.id}) · ${formatNotebookIcon(readNotebookIcon(row.content))}`;
         });
         return {
           content: [{ type: "text" as const, text: `Found ${notebooks.length} notebook(s) for '${query}':\n\n${notebooks.join("\n")}` }],
@@ -49,7 +49,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
         if (rows.length === 0) return { content: [{ type: "text" as const, text: "No notebooks found." }] };
         const notebooks = rows.map((row: any) => {
           const parsed = parseJoplinContent(row.content);
-          return `**${parsed.title}** (ID: ${row.id})`;
+          return `**${parsed.title}** (ID: ${row.id}) · ${formatNotebookIcon(readNotebookIcon(row.content))}`;
         });
         return { content: [{ type: "text" as const, text: `Notebooks (${rows.length}):\n\n${notebooks.join("\n")}` }] };
       } catch (e: any) {
@@ -132,6 +132,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
               parent: String(row.jop_parent_id || ""),
               title: parsed.title,
               deleted: parsed.isDeleted,
+              icon: readNotebookIcon(row.content),
             };
           })
           .filter((n) => !n.deleted);
@@ -154,7 +155,7 @@ export function registerNotebookTools(server: McpServer, deps: ToolDeps): void {
           for (const node of [...list].sort((a, b) => a.title.localeCompare(b.title))) {
             const count = counts.get(node.jopId) || 0;
             const branch = depth === 0 ? "" : `${"   ".repeat(depth - 1)}└─ `;
-            lines.push(`${branch}${node.title} · ${count} note(s) · ID: ${node.id}`);
+            lines.push(`${branch}${node.title} · ${count} note(s) · ID: ${node.id} · ${formatNotebookIcon(node.icon)}`);
             walk(children.get(node.jopId) || [], depth + 1);
           }
         };

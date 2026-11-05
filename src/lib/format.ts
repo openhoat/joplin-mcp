@@ -1,5 +1,7 @@
 /** Human-readable formatting of timestamps, byte sizes and mime types. */
 
+import type { NotebookIcon } from "./joplin-types.js";
+
 /**
  * Format an epoch-ms value as UTC "YYYY-MM-DD HH:MM:SS".
  * `pg` returns bigint columns as strings, so both shapes are accepted.
@@ -21,6 +23,16 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Render a notebook icon for a listing line: `icon: 🚗 (car)`, or `icon: none`
+ * when the notebook has no icon, so a read answer states the absence instead of
+ * leaving it to be guessed.
+ */
+export function formatNotebookIcon(icon: NotebookIcon | null): string {
+  if (!icon?.emoji) return "icon: none";
+  return icon.name ? `icon: ${icon.emoji} (${icon.name})` : `icon: ${icon.emoji}`;
 }
 
 export function fileExtensionFromName(name: string): string {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fileExtensionFromName, formatBytes, formatTimestamp, guessMime } from "./format.js";
+import { fileExtensionFromName, formatBytes, formatNotebookIcon, formatTimestamp, guessMime } from "./format.js";
 
 describe("formatTimestamp", () => {
   it("returns N/A for empty, zero, negative and unparsable values", () => {
@@ -24,6 +24,15 @@ describe("formatBytes", () => {
     expect(formatBytes(1536)).toBe("1.5 KB");
     expect(formatBytes(1024 * 1024)).toBe("1.0 MB");
     expect(formatBytes(5 * 1024 * 1024 + 512 * 1024)).toBe("5.5 MB");
+  });
+});
+
+describe("formatNotebookIcon", () => {
+  it("states the icon, keeps the name when known, and states the absence", () => {
+    expect(formatNotebookIcon({ emoji: "🩺", name: "stethoscope", type: 1 })).toBe("icon: 🩺 (stethoscope)");
+    expect(formatNotebookIcon({ emoji: "🐎", name: "" })).toBe("icon: 🐎");
+    expect(formatNotebookIcon(null)).toBe("icon: none");
+    expect(formatNotebookIcon({ emoji: "" })).toBe("icon: none");
   });
 });
 
